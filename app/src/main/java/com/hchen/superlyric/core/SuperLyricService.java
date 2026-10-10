@@ -110,6 +110,25 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     private final Object mSnapshotLock = new Object();
     @Nullable
     private volatile String mActivePublisher;
+    @Nullable
+    private volatile String mPreferredPublisher;
+    private volatile long mPlaybackEpoch;
+
+    // All calls are made with mSnapshotLock held.
+    private void setActivePublisherLocked(@Nullable String publisher) {
+        if (!java.util.Objects.equals(mActivePublisher, publisher)) {
+            mActivePublisher = publisher;
+            mPlaybackEpoch++;
+        }
+    }
+
+    /** The system supplies sessions in priority order, independently of callback arrival order. */
+    public void onSystemPlaybackPriorityChanged(@Nullable String publisher) {
+        synchronized (mSnapshotLock) {
+            if (mClosed) return;
+            mPreferredPublisher = publisher;
+        }
+    }
 
     // 系统级播放进度追踪器：自治插值计算与跨行调度
     private final PlaybackTracker mSystemTracker;
@@ -130,6 +149,11 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
 
             synchronized (mSnapshotLock) {
                 PublisherSession session = mSessions.get(activePkg);
+                if (!java.util.Objects.equals(activePkg, mActivePublisher) || session == null
+                    || session.latestLyric == null || !java.util.Objects.equals(
+                        cleanProgress.getLyricId(), session.latestLyric.getLyricId())
+                    || !java.util.Objects.equals(cleanProgress.getTitle(), session.latestLyric.getTitle())
+                    || !java.util.Objects.equals(cleanProgress.getArtist(), session.latestLyric.getArtist())) return;
                 if (session != null && session.latestLyric != null) {
                     SuperLyricData base = session.latestLyric;
                     SuperLyricData merged = new SuperLyricData()
@@ -160,7 +184,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
                 + (cleanProgress.hasTranslation() && cleanProgress.getTranslation() != null ? (", trans=\"" + cleanProgress.getTranslation().getText() + "\"") : "")
                 + (cleanProgress.hasSecondary() && cleanProgress.getSecondary() != null ? (", sec=\"" + cleanProgress.getSecondary().getText() + "\"") : ""));
 
-            notifyReceiver(activePkg, cleanProgress, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload));
+            notifyReceiver(activePkg, cleanProgress, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload), true);
         });
     }
 
@@ -389,27 +413,11 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
                 session.latestLyric = data;
             }
 
-            // 仲裁判定：当前上报应用是否有权成为全局活跃发布者
-            if (mActivePublisher == null) {
-                mActivePublisher = packageName;
-                shouldBroadcast = true;
-            } else if (TextUtils.equals(mActivePublisher, packageName)) {
-                shouldBroadcast = true;
-            } else {
-                // 另一个应用处于活跃：检查活跃应用是否真实处于播放中
-                PublisherSession activeSession = mSessions.get(mActivePublisher);
-                boolean activePlaying = activeSession != null && activeSession.isPlaying();
-                boolean currentPlaying = session.isPlaying();
-
-                if (!activePlaying || currentPlaying) {
-                    XposedLog.logI(TAG, "Publisher active switched from " + mActivePublisher + " to " + packageName
-                        + " (activePlaying=" + activePlaying + ", currentPlaying=" + currentPlaying + ")");
-                    mActivePublisher = packageName;
-                    shouldBroadcast = true;
-                } else {
-                    XposedLog.logD(TAG, "Publisher " + packageName + " sent lyric cached in session, suppressed by active playing " + mActivePublisher);
-                }
-            }
+            PublisherSession activeSession = mActivePublisher == null ? null : mSessions.get(mActivePublisher);
+            shouldBroadcast = PlaybackOwnership.mayPublish(mPreferredPublisher, mActivePublisher,
+                packageName, activeSession != null && activeSession.isPlaying(),
+                session.playbackState == null ? null : session.isPlaying());
+            if (shouldBroadcast) setActivePublisherLocked(packageName);
 
             if (shouldBroadcast) {
                 if (data.hasAllLyrics()) {
@@ -477,7 +485,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
             }
         }
 
-        notifyReceiver(packageName, broadcastPayload, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload));
+        notifyReceiver(packageName, broadcastPayload, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload), true);
     }
 
     @Override
@@ -496,10 +504,12 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
         synchronized (mSnapshotLock) {
             PublisherSession session = mSessions.get(packageName);
             if (session != null) {
-                session.clear();
+                // A publisher also sends stop while resolving another song. Playback state
+                // belongs to the system observer and must survive this lyric-cache reset.
+                session.latestLyric = null;
             }
             if (TextUtils.equals(mActivePublisher, packageName)) {
-                mActivePublisher = null;
+                setActivePublisherLocked(null);
                 mSystemTracker.stop();
                 mSystemTracker.setLyrics(null);
                 wasActive = true;
@@ -548,8 +558,10 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
             if (session == null || session.latestLyric == null) return;
             SuperLyricData snapshot = session.latestLyric;
             long generation = sPublisherGenerations.getOrDefault(publisher, 0L);
+            long playbackEpoch = mPlaybackEpoch;
             mBroadcastExecutor.execute(() -> {
                 if (mClosed || !publisher.equals(mActivePublisher) ||
+                    playbackEpoch != mPlaybackEpoch ||
                     sPublisherGenerations.getOrDefault(publisher, 0L) != generation) return;
                 if (target == null) {
                     broadcastToReceivers("reloadSnapshot", receiver -> receiver.onLyric(publisher, snapshot));
@@ -613,7 +625,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
                 session.clear();
             }
             if (TextUtils.equals(mActivePublisher, packageName)) {
-                mActivePublisher = null;
+                setActivePublisherLocked(null);
                 mSystemTracker.stop();
                 mSystemTracker.setLyrics(null);
                 wasActive = true;
@@ -650,14 +662,16 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
 
         synchronized (mSnapshotLock) {
             PublisherSession session = getOrCreateSessionLocked(packageName);
+            boolean wasPlaying = session.isPlaying();
             session.playbackState = state;
 
             switch (state.getState()) {
                 case PlaybackState.STATE_PLAYING -> {
+                    if (!PlaybackOwnership.mayActivate(mPreferredPublisher, mActivePublisher, packageName, wasPlaying)) break;
                     if (!TextUtils.equals(mActivePublisher, packageName)) {
                         String prevPublisher = mActivePublisher;
                         XposedLog.logI(TAG, "Active publisher switched to playing " + packageName + " (previous: " + prevPublisher + ")");
-                        mActivePublisher = packageName;
+                        setActivePublisherLocked(packageName);
                         mSystemTracker.stop();
 
                         if (session.latestLyric != null) {
@@ -688,7 +702,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
                 }
                 case PlaybackState.STATE_STOPPED, PlaybackState.STATE_NONE, PlaybackState.STATE_ERROR -> {
                     if (TextUtils.equals(mActivePublisher, packageName)) {
-                        mActivePublisher = null;
+                        setActivePublisherLocked(null);
                         mSystemTracker.stop();
                         mSystemTracker.setLyrics(null);
                         notifyStop = true;
@@ -705,7 +719,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
         }
 
         if (notifyLyric && lyricToNotify != null) {
-            notifyReceiver(packageName, lyricToNotify, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload));
+            notifyReceiver(packageName, lyricToNotify, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload), true);
         } else if (notifyStop && stopToNotify != null) {
             notifyReceiver(packageName, stopToNotify, (receiver, publisher, payload) -> receiver.onStop(publisher, payload));
         }
@@ -787,11 +801,17 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     }
 
     private void notifyReceiver(String publisher, SuperLyricData data, IReceiverCallback callback) {
+        notifyReceiver(publisher, data, callback, false);
+    }
+
+    private void notifyReceiver(String publisher, SuperLyricData data, IReceiverCallback callback, boolean activeOnly) {
         if (mClosed) return;
         if (isPublisher(publisher)) {
             long generation = sPublisherGenerations.getOrDefault(publisher, 0L);
+            long playbackEpoch = mPlaybackEpoch;
             mBroadcastExecutor.execute(() -> {
-                if (!isPublisher(publisher) || sPublisherGenerations.getOrDefault(publisher, 0L) != generation) {
+                if (mClosed || !PlaybackOwnership.mayDeliver(playbackEpoch, mPlaybackEpoch, publisher, mActivePublisher, activeOnly)
+                    || !isPublisher(publisher) || sPublisherGenerations.getOrDefault(publisher, 0L) != generation) {
                     return;
                 }
 
@@ -816,7 +836,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
                     session.clear();
                 }
                 if (TextUtils.equals(mActivePublisher, packageName)) {
-                    mActivePublisher = null;
+                    setActivePublisherLocked(null);
                     mSystemTracker.stop();
                     mSystemTracker.setLyrics(null);
                     wasActive = true;

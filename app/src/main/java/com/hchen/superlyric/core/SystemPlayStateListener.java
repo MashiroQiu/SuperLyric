@@ -62,13 +62,15 @@ public final class SystemPlayStateListener {
     private final MediaSessionManager.OnActiveSessionsChangedListener mListener = new MediaSessionManager.OnActiveSessionsChangedListener() {
         @Override
         public void onActiveSessionsChanged(@Nullable List<MediaController> controllers) {
-            if (mClosed || controllers == null) return;
+            if (mClosed) return;
 
             long token = Binder.clearCallingIdentity();
             try {
                 mCallbacks.forEach(MediaController::unregisterCallback);
                 mCallbacks.clear();
-                for (MediaController controller : controllers) {
+                List<MediaController> current = controllers == null ? java.util.Collections.emptyList() : controllers;
+                refreshPlaybackPriority(current);
+                for (MediaController controller : current) {
                     registerMediaControllerCallback(controller);
                 }
             } finally {
@@ -97,7 +99,9 @@ public final class SystemPlayStateListener {
     public void register() {
         long token = Binder.clearCallingIdentity();
         try {
-            for (MediaController controller : mMediaSessionManager.getActiveSessions(null)) {
+            List<MediaController> controllers = mMediaSessionManager.getActiveSessions(null);
+            refreshPlaybackPriority(controllers);
+            for (MediaController controller : controllers) {
                 registerMediaControllerCallback(controller);
             }
             mMediaSessionManager.addOnActiveSessionsChangedListener(mListener, null);
@@ -112,10 +116,16 @@ public final class SystemPlayStateListener {
      * 主动向指定包名的活跃 MediaSession 查询并同步当前播放状态与元数据。
      */
     public void syncCurrentStateForPackage(@NonNull String packageName) {
+        if (mClosed || SuperLyricService.isSystemPlayStateListenerDisabled(packageName)) return;
         long token = Binder.clearCallingIdentity();
         try {
-            for (MediaController controller : mCallbacks.keySet()) {
+            List<MediaController> controllers = mMediaSessionManager.getActiveSessions(null);
+            refreshPlaybackPriority(controllers);
+            for (MediaController controller : controllers) {
                 if (TextUtils.equals(controller.getPackageName(), packageName)) {
+                    // Queries create fresh controller wrappers. Registering here would call
+                    // the initial playback callback, which re-enters this query indefinitely.
+                    // Callback registration belongs exclusively to session-list changes.
                     PlaybackState state = controller.getPlaybackState();
                     if (state != null) {
                         mService.onSystemPlaybackStateChanged(packageName, state);
@@ -128,14 +138,35 @@ public final class SystemPlayStateListener {
                 }
             }
 
-            for (MediaController controller : mMediaSessionManager.getActiveSessions(null)) {
-                if (TextUtils.equals(controller.getPackageName(), packageName)) {
-                    registerMediaControllerCallback(controller);
-                    return;
-                }
-            }
         } catch (Throwable t) {
             XposedLog.logD(TAG, "Failed to sync state for package " + packageName + ": " + t.getMessage());
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private void refreshPlaybackPriority(@NonNull List<MediaController> controllers) {
+        // getActiveSessions() is ordered by system priority. Never let iteration order in
+        // mCallbacks or an old player's repeated PLAYING updates choose the lyric source.
+        for (MediaController controller : controllers) {
+            String pkg = controller.getPackageName();
+            if (!SuperLyricService.isPublisher(pkg) || SuperLyricService.isSystemPlayStateListenerDisabled(pkg)) continue;
+            PlaybackState state = controller.getPlaybackState();
+            if (state != null && state.getState() == PlaybackState.STATE_PLAYING) {
+                mService.onSystemPlaybackPriorityChanged(pkg);
+                mService.onSystemPlaybackStateChanged(pkg, state);
+                return;
+            }
+        }
+        mService.onSystemPlaybackPriorityChanged(null);
+    }
+
+    private void refreshPlaybackPriority() {
+        long token = Binder.clearCallingIdentity();
+        try {
+            refreshPlaybackPriority(mMediaSessionManager.getActiveSessions(null));
+        } catch (Throwable t) {
+            XposedLog.logD(TAG, "Failed to refresh playback priority: " + t.getMessage());
         } finally {
             Binder.restoreCallingIdentity(token);
         }
@@ -188,8 +219,17 @@ public final class SystemPlayStateListener {
             }
 
             if (SuperLyricService.isPublisher(pkg)) {
-                mService.onSystemPlaybackStateChanged(pkg, state);
+                // Callback arguments can already be stale. Read the highest-priority session
+                // for this package so an auxiliary/old session cannot pause its live player.
+                syncCurrentStateForPackage(pkg);
             }
+        }
+
+        @Override
+        public void onSessionDestroyed() {
+            if (mClosed) return;
+            mCallbacks.remove(mController);
+            refreshPlaybackPriority();
         }
 
         @Override
