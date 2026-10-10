@@ -101,6 +101,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
     private final Map<String, SuperLyricData> mLyricCache;
 
     private ExecutorService mExecutor;
+    private volatile boolean mClosed;
     private final AtomicReference<HttpURLConnection> mActiveConnection = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<SuperLyricData>> mActiveFuture = new AtomicReference<>();
 
@@ -121,6 +122,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
 
     @Override
     public void initEngine() {
+        if (mClosed) return;
         // 有界线程池：core=2, max=6, 60s 回收，CallerRunsPolicy 饱和防崩溃
         mExecutor = new ThreadPoolExecutor(
             2,
@@ -161,9 +163,18 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
         }
     }
 
+    @Override
+    public void close() {
+        mClosed = true;
+        cancel();
+        com.hchen.superlyric.reload.ReloadResources.stop(mExecutor);
+        mLyricCache.clear();
+    }
+
     @NonNull
     @Override
     public CompletableFuture<SuperLyricData> fetchFullLyric(@NonNull TrackContext context) {
+        if (mClosed) return CompletableFuture.completedFuture(null);
         cancel();
         AndroidLog.logI(ENGINE_TAG, "fetchFullLyric: [START] trackId=" + context.getTrackId()
             + ", title=" + context.getTitle()

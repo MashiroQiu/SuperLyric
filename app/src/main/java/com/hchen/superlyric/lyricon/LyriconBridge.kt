@@ -20,12 +20,25 @@ import com.hchen.superlyricapi.SuperLyricHelper
 import io.github.proify.lyricon.lyric.model.Song
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 
 /** One bridge per System UI process; all mutable state belongs to the main handler. */
 object LyriconBridge {
     private const val TAG = "SuperLyric-Lyricon"
     private val handler = Handler(Looper.getMainLooper())
+    @Volatile private var retiring = false
     private var context: Context? = null
+    private var bootReceiverRegistered = false
+    private val centralBootReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "io.github.proify.lyricon.lyric.bridge.CENTRAL_BOOT_COMPLETED") {
+                safely { reconnectToCentral() }
+            }
+        }
+    }
     private var provider: LyriconProvider? = null
     private var publisher: String? = null
     private var trackKey: String? = null
@@ -36,12 +49,14 @@ object LyriconBridge {
     private var sessionManager: MediaSessionManager? = null
 
     private val receiver = object : ISuperLyricReceiver.Stub() {
+        override fun asBinder(): android.os.IBinder = com.hchen.superlyric.reload.CallbackEndpoints.wrap(this)
         override fun onLyric(publisher: String?, data: SuperLyricData?) {
-            if (publisher.isNullOrBlank() || data == null) return
+            if (retiring || publisher.isNullOrBlank() || data == null) return
             handler.post { safely { receive(publisher, data) } }
         }
 
         override fun onStop(publisher: String?, data: SuperLyricData?) {
+            if (retiring) return
             handler.post {
                 safely {
                     // A delayed stop from the previous player must not hide the new player.
@@ -59,19 +74,27 @@ object LyriconBridge {
 
     @JvmStatic
     fun start(appContext: Context) {
+        if (retiring) return
         handler.post {
-            if (context != null) return@post
+            if (retiring || context != null) return@post
             context = appContext.applicationContext
             safely {
                 sessionManager = context?.getSystemService(MediaSessionManager::class.java)
                 // System UI already holds MEDIA_CONTENT_CONTROL; no notification access prompt.
                 sessionManager?.addOnActiveSessionsChangedListener(sessionsListener, null, handler)
             }
+            safely {
+                ContextCompat.registerReceiver(context!!, centralBootReceiver,
+                    IntentFilter("io.github.proify.lyricon.lyric.bridge.CENTRAL_BOOT_COMPLETED"),
+                    ContextCompat.RECEIVER_EXPORTED)
+                bootReceiverRegistered = true
+            }
             registerReceiver()
         }
     }
 
     private fun registerReceiver() {
+        if (retiring) return
         safely {
             if (SuperLyricHelper.isAvailable()) {
                 SuperLyricHelper.registerReceiver(receiver)
@@ -82,7 +105,32 @@ object LyriconBridge {
         handler.postDelayed(::registerReceiver, 5_000)
     }
 
+    /** A framework Binder survives reload, so an SDK cannot rely on binder death to reconnect. */
+    private fun reconnectToCentral() {
+        val packageName = publisher ?: return
+        val appContext = context ?: return
+        val song = cachedSong
+        val previousKey = trackKey
+        val hadFullSong = fullSong
+        releaseProvider()
+        val next = LyriconFactory.createProvider(appContext,
+            providerPackageName = BuildConfig.APPLICATION_ID,
+            playerPackageName = packageName, processName = null)
+        com.hchen.superlyric.reload.ProviderWorkers.track(next)
+        provider = next
+        publisher = packageName
+        trackKey = previousKey
+        cachedSong = song
+        fullSong = hadFullSong
+        next.autoSync = true
+        song?.let { next.player.setSong(it); next.player.setDisplayTranslation(true) }
+        next.register()
+        bindController()
+        Log.i(TAG, "Reconnected provider after central hot reload")
+    }
+
     private fun receive(packageName: String, incoming: SuperLyricData) {
+        if (retiring) return
         val newPublisher = publisher != packageName
         val key = LyriconSongMapper.trackKey(incoming)
         val newTrack = newPublisher || (incoming.hasLyricId() && key != trackKey)
@@ -95,6 +143,7 @@ object LyriconBridge {
                 playerPackageName = packageName,
                 processName = null
             )
+            com.hchen.superlyric.reload.ProviderWorkers.track(next)
             provider = next
             publisher = packageName
             next.autoSync = true
@@ -208,6 +257,23 @@ object LyriconBridge {
         }
     }
 
+    @JvmStatic
+    fun close() {
+        retiring = true
+        com.hchen.superlyric.reload.ReloadResources.onMain {
+            SuperLyricHelper.unregisterReceiver(receiver)
+            sessionManager?.removeOnActiveSessionsChangedListener(sessionsListener)
+            sessionManager = null
+            if (bootReceiverRegistered) context?.unregisterReceiver(centralBootReceiver)
+            bootReceiverRegistered = false
+            releaseProvider()
+            com.hchen.superlyric.reload.ProviderWorkers.unregisterBootReceiver(context)
+            handler.removeCallbacksAndMessages(null)
+            context = null
+            null
+        }
+    }
+
     private fun releaseProvider() {
         playbackCallback?.let { controller?.unregisterCallback(it) }
         playbackCallback = null
@@ -218,12 +284,15 @@ object LyriconBridge {
         val previous = provider
         provider = null
         publisher = null
-        previous?.player?.setPlaybackState(false)
-        previous?.player?.setSong(null)
-        previous?.destroy()
+        if (previous != null) {
+            runCatching { previous.player.setPlaybackState(false); previous.player.setSong(null) }
+                .onFailure { Log.d(TAG, "Previous central endpoint retired", it) }
+            previous.destroy()
+        }
     }
 
     private inline fun safely(action: () -> Unit) {
+        if (retiring) return
         try {
             action()
         } catch (error: Exception) {

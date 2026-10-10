@@ -21,6 +21,13 @@ package com.hchen.superlyric;
 import static com.hchen.hooktool.ModuleConfig.LOG_D;
 
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.app.AppComponentFactory;
+import android.os.Bundle;
+import com.hchen.superlyric.core.SuperLyricProxy;
+import com.hchen.superlyric.lyricon.LyriconBridge;
+import com.hchen.superlyric.publisher.UnifiedLyricProvider;
+import com.hchen.superlyric.reload.ReloadResources;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -29,7 +36,7 @@ import com.hchen.dexkitcache.DexkitCache;
 import com.hchen.hooktool.AbsModule;
 import com.hchen.hooktool.ModuleConfig;
 import com.hchen.hooktool.ModuleData;
-import com.hchen.hooktool.ModuleEntrance;
+import com.hchen.hooktool.ReloadModuleEntrance;
 import com.hchen.hooktool.log.AndroidLog;
 import com.hchen.hooktool.utils.PrefsTool;
 import com.hchen.processor.HookMaps;
@@ -53,11 +60,12 @@ import java.util.concurrent.Executors;
  *
  * @author 焕晨HChen
  */
-public final class HookEntrance extends ModuleEntrance {
+public final class HookEntrance extends ReloadModuleEntrance {
     private static final String TAG = "SuperLyric";
 
     @Override
     public void initModuleConfig() {
+        com.hchen.superlyric.reload.CallbackEndpoints.install(ModuleData.getWrapper());
         ModuleConfig.setLogTag(TAG);
         ModuleConfig.setPrefsName("super_lyric_prefs");
         ModuleConfig.setLogLevel(BuildConfig.DEBUG ? LOG_D : LocalConfig.getLogLevelForXposed());
@@ -84,6 +92,8 @@ public final class HookEntrance extends ModuleEntrance {
     }
 
     private final HashMap<String, List<AbsModule>> modules = new HashMap<>();
+    private final HashMap<String, PackageReadyParam> readyPackages = new HashMap<>();
+    private ClassLoader systemLoader;
     private final HashMap<String, ClassLoader> moduleClassLoaders = new HashMap<>();
     private final ExecutorService cacheMigrationExecutor = Executors.newSingleThreadExecutor();
     @Nullable
@@ -91,6 +101,8 @@ public final class HookEntrance extends ModuleEntrance {
 
     @Override
     public void handlePackageReady(@NonNull PackageReadyParam param) {
+        if (ReloadResources.retiring) return;
+        readyPackages.put(param.getPackageName(), param);
         AndroidLog.logD(TAG, "handlePackageReady: " + param.getPackageName() + " with loader: " + param.getClassLoader());
         super.handlePackageReady(param);
 
@@ -145,6 +157,7 @@ public final class HookEntrance extends ModuleEntrance {
 
     @Override
     public void handleApplicationCreated(@NonNull Context context) {
+        if (ReloadResources.retiring) return;
         AndroidLog.logD(TAG, "handleApplicationCreated: " + context.getPackageName());
         super.handleApplicationCreated(context);
 
@@ -185,6 +198,7 @@ public final class HookEntrance extends ModuleEntrance {
     @Override
     public void handleSystemServerStarting(@NonNull SystemServerStartingParam param) {
         super.handleSystemServerStarting(param);
+        systemLoader = param.getClassLoader();
 
         ModuleData.setClassLoader(param.getClassLoader());
         for (List<String> value : HookMaps.ON_SYSTEM_STARTING.values()) {
@@ -206,6 +220,79 @@ public final class HookEntrance extends ModuleEntrance {
 
     @Override
     public boolean isHotReloadingAllowed(@NonNull String packageName) {
-        return false;
+        return !ReloadResources.retiring && android.os.Looper.myLooper() != android.os.Looper.getMainLooper();
+    }
+
+    @Override
+    public Map<String, Object> handleHotReloading(@Nullable Bundle extras) {
+        ReloadResources.retiring = true;
+        Map<String, Object> saved = new HashMap<>();
+        saved.put("context", lastApplicationContext);
+        saved.put("systemLoader", systemLoader);
+        Map<String, Object> packages = new HashMap<>();
+        readyPackages.forEach((pkg, param) -> {
+            Map<String, Object> item = new HashMap<>();
+            item.put("info", param.getApplicationInfo());
+            item.put("loader", param.getClassLoader());
+            item.put("defaultLoader", param.getDefaultClassLoader());
+            item.put("factory", param.getAppComponentFactory());
+            item.put("first", param.isFirstPackage());
+            packages.put(pkg, item);
+        });
+        saved.put("packages", packages);
+        if (modules.containsKey("com.android.systemui")) LyriconBridge.close();
+        for (List<AbsModule> value : modules.values()) for (AbsModule module : value) {
+            if (module instanceof UnifiedLyricProvider provider) provider.close();
+        }
+        saved.put("systemService", SuperLyricProxy.retireAndSave());
+        ReloadResources.stop(cacheMigrationExecutor);
+        modules.clear();
+        moduleClassLoaders.clear();
+        readyPackages.clear();
+        lastApplicationContext = null;
+        com.hchen.superlyric.reload.CallbackEndpoints.retire();
+        ReloadResources.onMain(() -> null);
+        com.hchen.superlyric.reload.ProviderWorkers.retire();
+        com.hchen.superlyric.reload.LibraryWorkers.close();
+        AndroidLog.logI(TAG, "Hot reload: old generation retired");
+        return saved;
+    }
+
+    @Override
+    public void handleHotReloadingFailed(@NonNull Throwable error) {
+        SuperLyricProxy.failReload();
+        AndroidLog.logE(TAG, "Hot reload retirement failed; process restart required", error);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public void handleHotReloaded(@NonNull HotReloadedParam param, @NonNull ClassLoader loader) {
+        Map<String, Object> saved = (Map<String, Object>) param.getSavedInstanceState();
+        if (saved == null) throw new IllegalStateException("Missing hot reload state");
+        ClassLoader system = (ClassLoader) saved.get("systemLoader");
+        if (system != null) {
+            SuperLyricProxy.prepareRestore((Map<String, Object>) saved.get("systemService"));
+            handleSystemServerStarting(() -> system);
+        }
+        Map<String, Object> packages = (Map<String, Object>) saved.get("packages");
+        if (packages != null) packages.forEach((pkg, value) -> {
+            Map<String, Object> item = (Map<String, Object>) value;
+            handlePackageReady(new PackageReadyParam() {
+                public String getPackageName() { return pkg; }
+                public ApplicationInfo getApplicationInfo() { return (ApplicationInfo) item.get("info"); }
+                public boolean isFirstPackage() { return Boolean.TRUE.equals(item.get("first")); }
+                public ClassLoader getClassLoader() { return (ClassLoader) item.get("loader"); }
+                public ClassLoader getDefaultClassLoader() { return (ClassLoader) item.get("defaultLoader"); }
+                public AppComponentFactory getAppComponentFactory() { return (AppComponentFactory) item.get("factory"); }
+            });
+        });
+        Context context = (Context) saved.get("context");
+        if (context != null) {
+            ReloadResources.onMain(() -> { handleApplicationCreated(context); return null; });
+            for (List<AbsModule> value : modules.values()) for (AbsModule module : value) {
+                if (module instanceof UnifiedLyricProvider provider) provider.resumeAfterReload(context);
+            }
+        }
+        AndroidLog.logI(TAG, "Hot reload complete: " + BuildConfig.VERSION_NAME + " / " + param.getProcessName());
     }
 }

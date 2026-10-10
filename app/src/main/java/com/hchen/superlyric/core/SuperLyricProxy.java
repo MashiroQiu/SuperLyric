@@ -21,6 +21,13 @@ package com.hchen.superlyric.core;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.os.IBinder;
+import android.os.Parcel;
+import android.os.Bundle;
+import com.hchen.hooktool.ModuleData;
+import com.hchen.superlyric.reload.ServiceEndpoint;
+import com.hchen.superlyric.reload.ReloadResources;
+import io.github.libxposed.api.XposedInterface;
+import java.util.HashMap;
 
 import androidx.annotation.NonNull;
 
@@ -43,6 +50,54 @@ import io.github.libxposed.api.XposedModuleInterface;
 @HookThis(targetPackage = "system", onSystemStarting = true)
 public final class SuperLyricProxy extends AbsModule {
     private static SuperLyricService sSuperLyricService;
+    private static ServiceEndpoint sEndpoint;
+    private static Object sAms;
+    private static Map<String, Object> reloadState;
+
+    public static void failReload() { if (sEndpoint != null) sEndpoint.fail(); }
+
+    public static void prepareRestore(Map<String, Object> state) { reloadState = state; }
+
+    public static Map<String, Object> retireAndSave() {
+        Map<String, Object> state = new HashMap<>();
+        if (sEndpoint != null) {
+            sEndpoint.beginRetirement();
+            state.put("endpoint", sEndpoint.save());
+        }
+        state.put("ams", sAms);
+        if (sSuperLyricService != null) state.put("service", sSuperLyricService.retireAndSave());
+        sSuperLyricService = null;
+        sAms = null;
+        return state;
+    }
+
+    private void installEndpoint() {
+        try {
+            Method method = android.os.Binder.class.getDeclaredMethod("onTransact", int.class, Parcel.class, Parcel.class, int.class);
+            ModuleData.getWrapper().hook(method).setId(ServiceEndpoint.HOOK_ID)
+                .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(sEndpoint.hooker());
+        } catch (NoSuchMethodException error) {
+            throw new IllegalStateException("Binder dispatch method is unavailable", error);
+        }
+    }
+
+    private void initializeService(Object ams, Bundle saved) {
+        if (sSuperLyricService != null || ReloadResources.retiring) return;
+        Context context = (Context) getField(ams, "mContext");
+        if (context == null) throw new IllegalStateException("ActivityManager context is unavailable");
+        sAms = ams;
+        if (sEndpoint == null) sEndpoint = new ServiceEndpoint();
+        installEndpoint();
+        SuperLyricService next = new SuperLyricService(ams);
+        next.restore(saved);
+        sSuperLyricService = next;
+        SystemPlayStateListener listener = new SystemPlayStateListener(context, next);
+        next.setSystemPlayStateListener(listener);
+        ReloadResources.onMain(() -> { listener.register(); return null; });
+        sEndpoint.publish(next);
+        next.replayActiveLyric();
+        logI(tag, "SuperLyric service generation ready; clients retain their Binder endpoint");
+    }
 
     @Override
     protected void onPackageReady(@NonNull XposedModuleInterface.PackageReadyParam param) {
@@ -56,16 +111,7 @@ public final class SuperLyricProxy extends AbsModule {
                 @Override
                 public void after() {
                     try {
-                        if (sSuperLyricService == null) {
-                            Context mContext = (Context) getField(getThisObject(), "mContext");
-                            if (mContext != null) {
-                                sSuperLyricService = new SuperLyricService(getThisObject());
-                                SystemPlayStateListener playStateListener = new SystemPlayStateListener(mContext, sSuperLyricService);
-                                sSuperLyricService.setSystemPlayStateListener(playStateListener);
-                                playStateListener.register();
-                                logI(tag, "Super lyric system service initialized successfully.");
-                            }
-                        }
+                        initializeService(getThisObject(), null);
                     } catch (Throwable e) {
                         logE(tag, "Failed to initialize super lyric system service.", e);
                     }
@@ -97,8 +143,8 @@ public final class SuperLyricProxy extends AbsModule {
 
                     @SuppressWarnings("unchecked")
                     Map<String, IBinder> mAppBindArgs = (Map<String, IBinder>) getResult();
-                    if (!mAppBindArgs.containsKey("super_lyric")) {
-                        mAppBindArgs.put("super_lyric", sSuperLyricService);
+                    if (mAppBindArgs.get("super_lyric") != sEndpoint.binder) {
+                        mAppBindArgs.put("super_lyric", sEndpoint.binder);
                         logI(tag, "Exposed super_lyric binder service to common services.");
                     }
                 }
@@ -143,5 +189,15 @@ public final class SuperLyricProxy extends AbsModule {
                 }
             }
         );
+        if (reloadState != null) {
+            Map<String, Object> saved = reloadState;
+            reloadState = null;
+            @SuppressWarnings("unchecked")
+            Map<String, Object> endpointState = (Map<String, Object>) saved.get("endpoint");
+            if (endpointState != null) sEndpoint = new ServiceEndpoint(endpointState);
+            Object ams = saved.get("ams");
+            if (ams != null) initializeService(ams, (Bundle) saved.get("service"));
+        }
+
     }
 }

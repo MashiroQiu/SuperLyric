@@ -29,3 +29,17 @@
 # 隐藏 API / 仅编译依赖警告抑制
 -dontwarn android.os.ServiceManager
 -dontwarn de.robv.android.xposed.XposedHelpers
+# Reflection hooks keep SDK callback Binders neutral across module generations.
+-keep class io.github.proify.lyricon.provider.IProviderBinder$Stub { *; }
+-keep class io.github.proify.lyricon.provider.IProviderService$Stub { *; }
+-keep class com.hchen.superlyric.reload.** { *; }
+
+# Owned Okio watchdog retirement uses its pinned idle queue fields, never shared host instances.
+-keep class okio.AsyncTimeout { *; }
+-keep class okio.AsyncTimeout$* { *; }
+-keep class okio.PriorityQueue { *; }
+
+# SDK 0.1.70 reload cleanup uses these pinned internal lifecycle fields.
+-keep class io.github.proify.lyricon.provider.CentralServiceReceiver { *; }
+-keep class io.github.proify.lyricon.provider.impl.ProviderV27Impl { *; }
+-keep class io.github.proify.lyricon.provider.impl.RemoteServiceProxy { *; }

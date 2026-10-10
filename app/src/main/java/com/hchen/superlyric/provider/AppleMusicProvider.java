@@ -77,6 +77,12 @@ import java.util.concurrent.atomic.AtomicReference;
 public class AppleMusicProvider extends UnifiedLyricProvider {
     private static final String TAG = "AppleMusicProvider";
 
+    @Override
+    public void close() {
+        mMainHandler.removeCallbacksAndMessages(null);
+        super.close();
+    }
+
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
     private final AtomicReference<TrackContext> mActiveTrack = new AtomicReference<>();
     private final AtomicReference<SuperLyricData> mPendingLyricData = new AtomicReference<>();

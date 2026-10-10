@@ -45,6 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class LyricOrchestrator {
     private static final String TAG = "LyricOrchestrator";
+    private volatile boolean mClosed;
 
     public enum State {
         IDLE,
@@ -76,6 +77,13 @@ public final class LyricOrchestrator {
         this.mTracker = tracker;
     }
 
+    public void close() {
+        mClosed = true;
+        mCurrentTrack.set(null);
+        mState.set(State.IDLE);
+        if (mNetworkEngine != null) mNetworkEngine.close();
+    }
+
     public State getState() {
         return mState.get();
     }
@@ -84,6 +92,7 @@ public final class LyricOrchestrator {
      * 切歌事件触发：重置状态并优先由 Hook 引擎尝试获取。
      */
     public synchronized void onTrackChanged(@NonNull TrackContext context) {
+        if (mClosed) return;
         TrackContext current = mCurrentTrack.get();
         if (current != null && current.getTrackId().equals(context.getTrackId()) && mState.get() != State.IDLE) {
             // 同一首歌曲：严禁因蓝牙歌词导致 MediaSession title 变更而误判为切歌或重置时钟
@@ -148,6 +157,7 @@ public final class LyricOrchestrator {
      * Hook 引擎异步截获到解析产物时通知调度器。
      */
     public synchronized void onHookFullLyricCaptured(@NonNull TrackContext context, @NonNull SuperLyricData fullData) {
+        if (mClosed) return;
         TrackContext current = mCurrentTrack.get();
         if (current == null || !current.getTrackId().equals(context.getTrackId())) {
             AndroidLog.logD(TAG, "Discard stale hook lyric for: " + context.getTrackId());
@@ -161,6 +171,7 @@ public final class LyricOrchestrator {
      * Hook 确定无效（由 HookEngine 显式上报无歌词或捕获异常）。
      */
     public synchronized void onHookDeterminedInvalid(@NonNull TrackContext context) {
+        if (mClosed) return;
         TrackContext current = mCurrentTrack.get();
         if (current == null || !current.matches(context.getTrackId(), context.getGeneration())) {
             return;
@@ -281,6 +292,7 @@ public final class LyricOrchestrator {
     }
 
     public synchronized void onPlaybackStopped() {
+        if (mClosed) return;
         AndroidLog.logD(TAG, "onPlaybackStopped: stopping tracker and resetting orchestrator to IDLE");
         mTracker.stop();
         mTracker.setLyrics(null);

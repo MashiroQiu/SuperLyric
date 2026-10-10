@@ -57,6 +57,7 @@ public final class PlaybackTracker {
     private final HandlerThread mThread;
     private final Handler mHandler;
 
+    private volatile boolean mClosed = false;
     private volatile boolean mIsRunning = false;
     private volatile long mLoopToken = 0L;
 
@@ -169,7 +170,27 @@ public final class PlaybackTracker {
         mLastShownIndex = -1;
     }
 
+    /** Stop the owned looper, not just the periodic lyric loop. */
+    public void close() {
+        mClosed = true;
+        mIsRunning = false;
+        mLoopToken++;
+        mListener = null;
+        mCurrentLyricRef.set(null);
+        mHandler.removeCallbacksAndMessages(null);
+        mThread.quitSafely();
+        if (Thread.currentThread() == mThread) return;
+        try {
+            mThread.join(8000);
+            if (mThread.isAlive()) throw new IllegalStateException("Lyric tracker did not stop");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted retiring lyric tracker", error);
+        }
+    }
+
     private synchronized void checkLoopStatus() {
+        if (mClosed) return;
         PlaybackSnapshot playback = mPlaybackRef.get();
         SuperLyricData lyric = mCurrentLyricRef.get();
 

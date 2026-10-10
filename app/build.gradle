@@ -42,8 +42,8 @@ android {
         minSdk 30
         targetSdk 37
         // noinspection HighAppVersionCode
-        versionCode 2026101001
-        versionName "4.0-qq-timeline-fix"
+        versionCode 2026101002
+        versionName "4.0-api102-hotreload"
 
         ndk {
             // noinspection ChromeOsAbiSupport
@@ -110,6 +110,8 @@ androidComponents {
 
 dependencies {
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.mockito:mockito-core:5.18.0"
+    testImplementation libs.api
     configurations.configureEach {
         resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
         resolutionStrategy.cacheDynamicVersionsFor 0, 'seconds'

@@ -45,6 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class SystemPlayStateListener {
     private static final String TAG = "SystemPlayStateListener";
+    private volatile boolean mClosed;
 
     @NonNull
     private final Context mContext;
@@ -61,7 +62,7 @@ public final class SystemPlayStateListener {
     private final MediaSessionManager.OnActiveSessionsChangedListener mListener = new MediaSessionManager.OnActiveSessionsChangedListener() {
         @Override
         public void onActiveSessionsChanged(@Nullable List<MediaController> controllers) {
-            if (controllers == null) return;
+            if (mClosed || controllers == null) return;
 
             long token = Binder.clearCallingIdentity();
             try {
@@ -80,6 +81,17 @@ public final class SystemPlayStateListener {
         mContext = context;
         mService = service;
         mMediaSessionManager = (MediaSessionManager) mContext.getSystemService(Context.MEDIA_SESSION_SERVICE);
+    }
+
+    public void close() {
+        mClosed = true;
+        com.hchen.superlyric.reload.ReloadResources.onMain(() -> {
+            mMediaSessionManager.removeOnActiveSessionsChangedListener(mListener);
+            mCallbacks.forEach(MediaController::unregisterCallback);
+            mCallbacks.clear();
+            mMainHandler.removeCallbacksAndMessages(null);
+            return null;
+        });
     }
 
     public void register() {
@@ -169,7 +181,7 @@ public final class SystemPlayStateListener {
         @Override
         public void onPlaybackStateChanged(@Nullable PlaybackState state) {
             super.onPlaybackStateChanged(state);
-            if (state == null) return;
+            if (mClosed || state == null) return;
             String pkg = mController.getPackageName();
             if (SuperLyricService.isSystemPlayStateListenerDisabled(pkg)) {
                 return;
@@ -183,7 +195,7 @@ public final class SystemPlayStateListener {
         @Override
         public void onMetadataChanged(@Nullable MediaMetadata metadata) {
             super.onMetadataChanged(metadata);
-            if (metadata == null) return;
+            if (mClosed || metadata == null) return;
             String pkg = mController.getPackageName();
             if (SuperLyricService.isSystemPlayStateListenerDisabled(pkg)) {
                 return;

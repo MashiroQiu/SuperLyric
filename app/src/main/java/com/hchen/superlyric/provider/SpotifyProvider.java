@@ -125,6 +125,7 @@ public class SpotifyProvider extends UnifiedLyricProvider {
      * Spotify 网络歌词拉取引擎实现。
      */
     private final class SpotifyNetworkLyricEngine implements INetworkLyricEngine {
+        private volatile boolean mClosed;
         private final ExecutorService mExecutor = Executors.newFixedThreadPool(2, r -> {
             Thread t = new Thread(r, "SpotifyNetwork-Worker");
             t.setDaemon(true);
@@ -150,6 +151,7 @@ public class SpotifyProvider extends UnifiedLyricProvider {
         @NonNull
         @Override
         public CompletableFuture<SuperLyricData> fetchFullLyric(@NonNull TrackContext context) {
+            if (mClosed) return CompletableFuture.completedFuture(null);
             CompletableFuture<SuperLyricData> future = new CompletableFuture<>();
             String trackId = context.getTrackId();
             if (trackId == null || trackId.trim().isEmpty()) {
@@ -201,6 +203,14 @@ public class SpotifyProvider extends UnifiedLyricProvider {
         /**
          * 捕获会话头：明文快速通道 + DexKit 结构指纹兜底。
          */
+        @Override
+        public void close() {
+            mClosed = true;
+            SpotifyLyricAnalysis.close();
+            com.hchen.superlyric.reload.ReloadResources.stop(mTimeoutScheduler);
+            com.hchen.superlyric.reload.ReloadResources.stop(mExecutor);
+        }
+
         private void hookSessionHeaders() {
             AbsHook captureHook = new AbsHook() {
                 @Override

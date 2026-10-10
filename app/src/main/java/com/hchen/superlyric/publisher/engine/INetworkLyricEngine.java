@@ -54,4 +54,7 @@ public interface INetworkLyricEngine {
      * 取消未完成的网络任务。
      */
     void cancel();
+
+    /** Permanent retirement; implementations owning executors must also join them. */
+    default void close() { cancel(); }
 }

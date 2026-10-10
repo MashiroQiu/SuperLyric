@@ -107,6 +107,7 @@ public abstract class AbsPublisher extends AbsModule {
      * 发送全量歌词数据包（切歌或歌词初次解析完毕时调用）。
      */
     public static void publishFullLyric(@NonNull SuperLyricData fullData) {
+        if (com.hchen.superlyric.reload.ReloadResources.retiring) return;
         SuperLyricData clean = LyricSanitizer.sanitizeData(fullData);
         if (clean == null) return;
         synchronized (sPublishLock) {
@@ -118,6 +119,7 @@ public abstract class AbsPublisher extends AbsModule {
      * 发送播放中的行索引与进度更新（极轻量增量包）。
      */
     public static void publishLyricProgress(@NonNull SuperLyricData progressData) {
+        if (com.hchen.superlyric.reload.ReloadResources.retiring) return;
         SuperLyricData clean = LyricSanitizer.sanitizeData(progressData);
         if (clean == null) return;
         synchronized (sPublishLock) {
@@ -129,6 +131,7 @@ public abstract class AbsPublisher extends AbsModule {
      * 发送停止/暂停事件。
      */
     public static void publishStop() {
+        if (com.hchen.superlyric.reload.ReloadResources.retiring) return;
         publishStop(new SuperLyricData());
     }
 
@@ -136,6 +139,7 @@ public abstract class AbsPublisher extends AbsModule {
      * 发送停止/暂停事件（带上下文）。
      */
     public static void publishStop(@NonNull SuperLyricData stopData) {
+        if (com.hchen.superlyric.reload.ReloadResources.retiring) return;
         synchronized (sPublishLock) {
             SuperLyricHelper.sendStop(stopData);
         }
@@ -145,6 +149,7 @@ public abstract class AbsPublisher extends AbsModule {
      * 向下兼容通道：发送单行歌词数据包。
      */
     public static void publishLegacySingleLine(@NonNull SuperLyricData singleLineData) {
+        if (com.hchen.superlyric.reload.ReloadResources.retiring) return;
         SuperLyricData clean = LyricSanitizer.sanitizeData(singleLineData);
         if (clean == null) return;
         synchronized (sPublishLock) {

@@ -99,6 +99,14 @@ public final class SpotifyLyricAnalysis {
         .callTimeout(30, TimeUnit.SECONDS)
         .build();
 
+    public static void close() {
+        cancelExcept(null);
+        sHeaderListeners.clear();
+        client.dispatcher().cancelAll();
+        client.connectionPool().evictAll();
+        com.hchen.superlyric.reload.ReloadResources.stop(client.dispatcher().executorService());
+    }
+
     private SpotifyLyricAnalysis() {
     }
 

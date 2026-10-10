@@ -22,6 +22,8 @@ import android.content.pm.ApplicationInfo;
 import android.media.MediaMetadata;
 import android.media.session.PlaybackState;
 import android.os.Binder;
+import android.os.Bundle;
+import android.os.Parcel;
 import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.RemoteCallbackList;
@@ -66,6 +68,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     private static final String TAG = "SuperLyricService";
     private static final int MAX_CACHED_SESSIONS = 5;
 
+    private volatile boolean mClosed;
     private final Object mAms;
     private final Set<IBinder> mReceiverBinders = ConcurrentHashMap.newKeySet();
 
@@ -159,6 +162,106 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
 
             notifyReceiver(activePkg, cleanProgress, (receiver, publisher, payload) -> receiver.onLyric(publisher, payload));
         });
+    }
+
+    /** Save no module objects: lyrics are bytes, endpoints are BinderProxy, clocks are framework values. */
+    public Bundle retireAndSave() {
+        mClosed = true;
+        SystemPlayStateListener listener = mSystemPlayStateListener;
+        if (listener != null) listener.close();
+        mSystemPlayStateListener = null;
+        mSystemTracker.close();
+        com.hchen.superlyric.reload.ReloadResources.stop(mBroadcastExecutor);
+        Bundle out = new Bundle();
+        out.putInt("schema", 1);
+        Bundle publishers = new Bundle();
+        sPublisherPids.forEach((pkg, pids) -> publishers.putIntArray(pkg, pids.stream().mapToInt(Integer::intValue).toArray()));
+        out.putBundle("publishers", publishers);
+        Bundle generations = new Bundle();
+        sPublisherGenerations.forEach(generations::putLong);
+        out.putBundle("generations", generations);
+        out.putStringArrayList("disabled", new ArrayList<>(sSystemPlayStateListenerDisabledPackages));
+        Bundle receivers = new Bundle();
+        int count = mCallbacks.getRegisteredCallbackCount();
+        for (int i = 0; i < count; i++) receivers.putBinder(Integer.toString(i), mCallbacks.getRegisteredCallbackItem(i).asBinder());
+        out.putBundle("receivers", receivers);
+        synchronized (mSnapshotLock) {
+            out.putString("active", mActivePublisher);
+            Bundle sessions = new Bundle();
+            mSessions.forEach((pkg, session) -> {
+                Bundle item = new Bundle();
+                item.putParcelable("playback", session.playbackState);
+                item.putLong("touched", session.lastActiveTime);
+                if (session.latestLyric != null) {
+                    Parcel parcel = Parcel.obtain();
+                    try {
+                        session.latestLyric.writeToParcel(parcel, 0);
+                        item.putByteArray("lyric", parcel.marshall());
+                    } finally { parcel.recycle(); }
+                }
+                sessions.putBundle(pkg, item);
+            });
+            out.putBundle("sessions", sessions);
+            mSessions.clear();
+            mActivePublisher = null;
+        }
+        mCallbacks.kill();
+        mReceiverBinders.clear();
+        sPublisherPids.clear();
+        sPublisherGenerations.clear();
+        sSystemPlayStateListenerDisabledPackages.clear();
+        return out;
+    }
+
+    @SuppressWarnings("deprecation")
+    public void restore(Bundle state) {
+        if (state == null) return;
+        if (state.getInt("schema") != 1) throw new IllegalArgumentException("Unsupported lyric reload state");
+        Bundle publishers = state.getBundle("publishers");
+        if (publishers != null) for (String pkg : publishers.keySet()) {
+            Set<Integer> pids = ConcurrentHashMap.newKeySet();
+            for (int pid : publishers.getIntArray(pkg)) {
+                if (pkg.equals(getPackageNameWithPid(pid))) pids.add(pid);
+            }
+            if (!pids.isEmpty()) sPublisherPids.put(pkg, pids);
+        }
+        Bundle generations = state.getBundle("generations");
+        if (generations != null) for (String pkg : generations.keySet()) sPublisherGenerations.put(pkg, generations.getLong(pkg));
+        List<String> disabled = state.getStringArrayList("disabled");
+        if (disabled != null) sSystemPlayStateListenerDisabledPackages.addAll(disabled);
+        Bundle sessions = state.getBundle("sessions");
+        if (sessions != null) for (String pkg : sessions.keySet()) {
+            if (!isPublisher(pkg)) continue;
+            Bundle item = sessions.getBundle(pkg);
+            if (item == null) continue;
+            PublisherSession session = new PublisherSession(pkg);
+            session.playbackState = item.getParcelable("playback");
+            session.lastActiveTime = item.getLong("touched");
+            byte[] bytes = item.getByteArray("lyric");
+            if (bytes != null) {
+                Parcel parcel = Parcel.obtain();
+                try {
+                    parcel.unmarshall(bytes, 0, bytes.length);
+                    parcel.setDataPosition(0);
+                    session.latestLyric = SuperLyricData.CREATOR.createFromParcel(parcel);
+                } finally { parcel.recycle(); }
+            }
+            mSessions.put(pkg, session);
+        }
+        Bundle receivers = state.getBundle("receivers");
+        if (receivers != null) for (String key : receivers.keySet()) {
+            IBinder binder = receivers.getBinder(key);
+            if (binder == null || !binder.isBinderAlive()) continue;
+            ISuperLyricReceiver receiver = ISuperLyricReceiver.Stub.asInterface(binder);
+            mCallbacks.register(receiver);
+            mReceiverBinders.add(binder);
+        }
+        mActivePublisher = state.getString("active");
+        PublisherSession active = mActivePublisher == null ? null : mSessions.get(mActivePublisher);
+        if (active != null) {
+            mSystemTracker.setLyrics(active.latestLyric);
+            mSystemTracker.onPlaybackStateChanged(active.playbackState);
+        } else { mActivePublisher = null; }
     }
 
     public void setSystemPlayStateListener(@Nullable SystemPlayStateListener listener) {
@@ -424,12 +527,37 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
 
     @Override
     public void registerReceiver(ISuperLyricReceiver receiver) throws RemoteException {
-        if (receiver != null) {
+        if (receiver != null && !mClosed) {
             int pid = Binder.getCallingPid();
             String packageName = getPackageNameWithPid(pid);
-            mCallbacks.register(receiver);
+            boolean added = mCallbacks.register(receiver);
             mReceiverBinders.add(receiver.asBinder());
+            if (added) replayActiveLyric(receiver);
             XposedLog.logI(TAG, "Register receiver: " + receiver + ", pkg: " + packageName + ", pid: " + pid + ", binder: " + receiver.asBinder());
+        }
+    }
+
+    /** A fresh bridge needs the complete song, not just subsequent line increments. */
+    public void replayActiveLyric() { replayActiveLyric(null); }
+
+    private void replayActiveLyric(@Nullable ISuperLyricReceiver target) {
+        synchronized (mSnapshotLock) {
+            if (mClosed || mActivePublisher == null) return;
+            String publisher = mActivePublisher;
+            PublisherSession session = mSessions.get(publisher);
+            if (session == null || session.latestLyric == null) return;
+            SuperLyricData snapshot = session.latestLyric;
+            long generation = sPublisherGenerations.getOrDefault(publisher, 0L);
+            mBroadcastExecutor.execute(() -> {
+                if (mClosed || !publisher.equals(mActivePublisher) ||
+                    sPublisherGenerations.getOrDefault(publisher, 0L) != generation) return;
+                if (target == null) {
+                    broadcastToReceivers("reloadSnapshot", receiver -> receiver.onLyric(publisher, snapshot));
+                } else if (mReceiverBinders.contains(target.asBinder())) {
+                    try { target.onLyric(publisher, snapshot); }
+                    catch (RemoteException error) { XposedLog.logD(TAG, "Snapshot receiver unavailable: " + error); }
+                }
+            });
         }
     }
 
@@ -465,6 +593,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     }
 
     public void onProcessDied(@NonNull String packageName, int pid) {
+        if (mClosed) return;
         Set<Integer> pids = sPublisherPids.get(packageName);
         if (pids == null || !pids.remove(pid)) {
             return;
@@ -504,6 +633,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     }
 
     public void onSystemPlaybackStateChanged(@NonNull String packageName, @NonNull PlaybackState state) {
+        if (mClosed) return;
         if (!isPublisher(packageName)) {
             return;
         }
@@ -582,6 +712,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     }
 
     public void onSystemMetadataChanged(@NonNull String packageName, @Nullable MediaMetadata metadata) {
+        if (mClosed) return;
         if (!isPublisher(packageName) || metadata == null) {
             return;
         }
@@ -656,6 +787,7 @@ public final class SuperLyricService extends ISuperLyricManager.Stub {
     }
 
     private void notifyReceiver(String publisher, SuperLyricData data, IReceiverCallback callback) {
+        if (mClosed) return;
         if (isPublisher(publisher)) {
             long generation = sPublisherGenerations.getOrDefault(publisher, 0L);
             mBroadcastExecutor.execute(() -> {

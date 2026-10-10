@@ -18,6 +18,7 @@
  */
 package com.hchen.superlyric.publisher;
 
+import android.content.Context;
 import android.media.MediaMetadata;
 import android.media.session.PlaybackState;
 
@@ -44,7 +45,8 @@ import io.github.libxposed.api.XposedModuleInterface;
  *
  * @author 焕晨HChen
  */
-public abstract class UnifiedLyricProvider extends AbsPublisher {
+public abstract class UnifiedLyricProvider extends AbsPublisher implements AutoCloseable {
+    protected volatile boolean mClosed;
     protected final PlaybackTracker mTracker = new PlaybackTracker();
     protected LyricOrchestrator mOrchestrator;
     protected final AtomicLong mTrackGeneration = new AtomicLong(0);
@@ -121,6 +123,7 @@ public abstract class UnifiedLyricProvider extends AbsPublisher {
     }
 
     protected void onMetadataChanged(@NonNull MediaMetadata metadata) {
+        if (mClosed) return;
         String trackId = extractTrackId(metadata);
         if (trackId == null || trackId.isEmpty()) {
             logD(tag, "MediaSession metadata cleared or empty trackId, stopping playback");
@@ -145,12 +148,38 @@ public abstract class UnifiedLyricProvider extends AbsPublisher {
     }
 
     protected void onPlaybackStateChanged(@NonNull PlaybackState state) {
+        if (mClosed) return;
         logD(tag, "MediaSession onPlaybackStateChanged: state=" + stateToString(state.getState())
             + ", pos=" + state.getPosition() + "ms"
             + ", speed=" + state.getPlaybackSpeed());
         mTracker.onPlaybackStateChanged(state);
         if (state.getState() == PlaybackState.STATE_STOPPED) {
             mOrchestrator.onPlaybackStopped();
+        }
+    }
+
+    @Override
+    public void close() {
+        mClosed = true;
+        mTrackGeneration.incrementAndGet();
+        if (mOrchestrator != null) mOrchestrator.close();
+        mTracker.close();
+        // Registration is just this live host PID, not an old-generation object. Keep it so
+        // system_server retains the full song/clock while the publisher generation is swapped.
+    }
+
+    /** Seed network resolution/clock from the currently playing host MediaSession after reload. */
+    public void resumeAfterReload(Context context) {
+        android.media.session.MediaSessionManager manager = context.getSystemService(android.media.session.MediaSessionManager.class);
+        try {
+            for (android.media.session.MediaController controller : manager.getActiveSessions(null)) {
+                if (!context.getPackageName().equals(controller.getPackageName())) continue;
+                if (controller.getMetadata() != null) onMetadataChanged(controller.getMetadata());
+                if (controller.getPlaybackState() != null) onPlaybackStateChanged(controller.getPlaybackState());
+            }
+        } catch (SecurityException ignored) {
+            // Music apps need not hold MEDIA_CONTENT_CONTROL. The system service retains the full
+            // song and clock; subsequent host setMetadata / setPlaybackState calls refresh this side.
         }
     }
 
