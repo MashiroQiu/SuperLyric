@@ -76,7 +76,22 @@
 
 ---
 
-## 🌟 API 项目
+## Lyricon（词幕）Provider
+
+SuperLyric 可以把系统服务已仲裁的歌词转发给词幕。支持完整歌曲、逐字时间轴、翻译、次要歌词和无时间轴的单行文本；保留原播放器包名。词幕会将 SuperLyric 识别为歌词提供模块。
+
+1. 安装并激活 SuperLyric 和词幕。
+2. 在 LSPosed 的 SuperLyric 作用域中保留系统框架与音乐应用，并额外勾选 **系统界面（com.android.systemui）**。
+3. 词幕也需要勾选系统界面作用域，启用内置中心服务。
+4. 重启设备，播放已支持音乐应用的歌曲。转发运行在 System UI，不需要保持 SuperLyric 设置页面打开。
+
+桥接复用 SuperLyric 系统服务，因此也覆盖原生使用 SuperLyric API 的播放器。切换播放器时销毁旧 Provider；中心服务重连时由 SDK 自动同步缓存。MediaSession 可用时同步真实播放速度、暂停和跳转；没有 MediaSession 时使用歌词包提供的位置与播放/停止事件。
+
+验证建议：检查歌词与翻译显示、暂停/继续、拖动进度、两播放器切换及 System UI 重启后的恢复。不要同时启用同一播放器的多个歌词来源，以免来源竞争。
+
+接口文档：[Lyricon Provider](https://tomakino.github.io/lyricon/zh-cn/developer/provider/)。
+
+## SuperLyric API
 
 - API 项目地址：[SuperLyricApi](https://github.com/HChenX/SuperLyricApi)
 

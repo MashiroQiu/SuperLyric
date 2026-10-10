@@ -85,7 +85,7 @@ public final class LyricOrchestrator {
      */
     public synchronized void onTrackChanged(@NonNull TrackContext context) {
         TrackContext current = mCurrentTrack.get();
-        if (current != null && current.getTrackId().equals(context.getTrackId())) {
+        if (current != null && current.getTrackId().equals(context.getTrackId()) && mState.get() != State.IDLE) {
             // 同一首歌曲：严禁因蓝牙歌词导致 MediaSession title 变更而误判为切歌或重置时钟
             // 仅在缺失必要信息时进行无害元数据补全，保持当前曲目真实元数据稳定
             TrackContext merged = new TrackContext(
@@ -103,6 +103,7 @@ public final class LyricOrchestrator {
 
         mCurrentTrack.set(context);
         mTracker.stop();
+        mTracker.setLyrics(null);
         AbsPublisher.publishStop();
 
         if (mNetworkEngine != null) {
@@ -282,6 +283,7 @@ public final class LyricOrchestrator {
     public synchronized void onPlaybackStopped() {
         AndroidLog.logD(TAG, "onPlaybackStopped: stopping tracker and resetting orchestrator to IDLE");
         mTracker.stop();
+        mTracker.setLyrics(null);
         AbsPublisher.publishStop();
         if (mLegacyEngine != null) {
             mLegacyEngine.disableLegacyHook();

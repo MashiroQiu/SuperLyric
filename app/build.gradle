@@ -42,8 +42,8 @@ android {
         minSdk 30
         targetSdk 37
         // noinspection HighAppVersionCode
-        versionCode 2026100900
-        versionName "4.0"
+        versionCode 2026101001
+        versionName "4.0-qq-timeline-fix"
 
         ndk {
             // noinspection ChromeOsAbiSupport
@@ -109,6 +109,7 @@ androidComponents {
 }
 
 dependencies {
+    testImplementation "junit:junit:4.13.2"
     configurations.configureEach {
         resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
         resolutionStrategy.cacheDynamicVersionsFor 0, 'seconds'
@@ -143,6 +144,7 @@ dependencies {
     implementation(libs.superlyricapi) {
         changing = true
     }
+    implementation libs.lyricon.provider
 
     compileOnly(project(':hidden-api'))
     implementation project(':processor')

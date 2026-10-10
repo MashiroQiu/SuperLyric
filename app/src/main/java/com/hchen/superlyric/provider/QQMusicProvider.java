@@ -256,7 +256,8 @@ public class QQMusicProvider extends UnifiedLyricProvider {
             }
 
             // 去重防护：若为同一曲目，仅在当前数据更完整（补充了逐字或行数更多）且非劣质数据时才允许更新
-            if (Objects.equals(mLastProcessedTrackId, meta.trackId)) {
+            if (Objects.equals(mLastProcessedTrackId, meta.trackId)
+                && mOrchestrator != null && mOrchestrator.getState() == com.hchen.superlyric.publisher.LyricOrchestrator.State.FULL_ACTIVE) {
                 if (mLastHadWords && !hasWords) {
                     return; // 劣质包（丢失逐字）丢弃
                 }
@@ -376,6 +377,8 @@ public class QQMusicProvider extends UnifiedLyricProvider {
 
         if (list.isEmpty()) return null;
 
+        list.sort(Comparator.comparingLong(line -> line.startMs));
+
         // 校准每行结束时间（若为 0 则平滑采用下一行起始时间）
         for (int i = 0; i < list.size(); i++) {
             ParsedLine cur = list.get(i);
@@ -424,44 +427,8 @@ public class QQMusicProvider extends UnifiedLyricProvider {
             }
         }
 
-        if (numFields.size() == 1) {
-            startField = numFields.get(0);
-        } else if (numFields.size() >= 2) {
-            Field bestStartField = null;
-            int sampleCount = Math.min(rawLines.size(), 15);
-            for (Field f : numFields) {
-                boolean monotonic = true;
-                long prev = -1;
-                for (int i = 0; i < sampleCount; i++) {
-                    try {
-                        long val = ((Number) f.get(rawLines.get(i))).longValue();
-                        if (val < 0) { monotonic = false; break; }
-                        if (prev != -1 && val < prev) { monotonic = false; break; }
-                        prev = val;
-                    } catch (Throwable t) {
-                        monotonic = false;
-                        break;
-                    }
-                }
-                if (monotonic && prev > 0) {
-                    bestStartField = f;
-                    break;
-                }
-            }
-
-            if (bestStartField != null) {
-                startField = bestStartField;
-                for (Field f : numFields) {
-                    if (f != bestStartField) {
-                        durationField = f;
-                        break;
-                    }
-                }
-            } else {
-                startField = numFields.get(0);
-                durationField = numFields.get(1);
-            }
-        }
+        startField = QQTimelineFields.start(rawLines, numFields);
+        if (startField != null) durationField = QQTimelineFields.duration(rawLines, numFields, startField);
 
         // 3. 甄别逐字列表字段：类型为 List 且其元素为词元对象（含有数值字段）
         for (Field f : clazz.getDeclaredFields()) {

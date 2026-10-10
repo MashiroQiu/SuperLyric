@@ -101,7 +101,7 @@ public final class PlaybackTracker {
             state.getState(),
             state.getPosition(),
             state.getPlaybackSpeed(),
-            SystemClock.elapsedRealtime()
+            state.getLastPositionUpdateTime() > 0 ? state.getLastPositionUpdateTime() : SystemClock.elapsedRealtime()
         );
         mPlaybackRef.set(snapshot);
         AndroidLog.logD(TAG, "onPlaybackStateChanged: state=" + state.getState() + ", pos=" + state.getPosition() + "ms, speed=" + state.getPlaybackSpeed());
@@ -256,6 +256,7 @@ public final class PlaybackTracker {
 
     private static long estimatePosition(@NonNull PlaybackSnapshot playback, long now) {
         long base = Math.max(0L, playback.position);
+        if (playback.state != PlaybackState.STATE_PLAYING) return base;
         if (!Float.isFinite(playback.speed) || playback.speed < 0f || now <= playback.anchorTime) {
             return base;
         }

@@ -19,6 +19,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SuperLyric">
 
+        <meta-data android:name="lyricon_module" android:value="true" />
+        <meta-data android:name="lyricon_module_author" android:value="HChenX" />
+        <meta-data android:name="lyricon_module_description" android:resource="@string/lyricon_description" />
+        <meta-data android:name="lyricon_module_tags" android:resource="@array/lyricon_module_tags" />
+
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
