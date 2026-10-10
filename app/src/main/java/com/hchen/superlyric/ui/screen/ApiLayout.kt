@@ -1542,7 +1542,7 @@ internal object ApiReceiverManager {
             android.util.Log.e("ApiReceiverManager", "Failed to register receiver", e)
             isRegistered = false
         }
-        if (receiverFlow.value.data == null) {
+        if (receiverFlow.value.allLyricsCache.isNullOrEmpty()) {
             pullLatest()
         }
     }

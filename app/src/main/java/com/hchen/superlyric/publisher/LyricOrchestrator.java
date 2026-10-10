@@ -21,7 +21,7 @@ package com.hchen.superlyric.publisher;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.hchen.hooktool.log.AndroidLog;
+import com.hchen.hooktool.log.XposedLog;
 import com.hchen.superlyric.publisher.engine.IHookLyricEngine;
 import com.hchen.superlyric.publisher.engine.ILegacyLyricEngine;
 import com.hchen.superlyric.publisher.engine.INetworkLyricEngine;
@@ -106,7 +106,7 @@ public final class LyricOrchestrator {
                 current.getDuration() > 0 ? current.getDuration() : context.getDuration()
             );
             mCurrentTrack.set(merged);
-            AndroidLog.logD(TAG, "Track metadata updated for same track: " + context.getTrackId() + ", skipping re-resolution");
+            XposedLog.logD(TAG, "Track metadata updated for same track: " + context.getTrackId() + ", skipping re-resolution");
             return;
         }
 
@@ -125,7 +125,7 @@ public final class LyricOrchestrator {
         }
 
         if (mHookEngine != null) {
-            AndroidLog.logD(TAG, "Track changed: " + context + ", starting hook resolution");
+            XposedLog.logD(TAG, "Track changed: " + context + ", starting hook resolution");
             mState.set(State.HOOK_RESOLVING);
             mHookEngine.onTrackChanged(context);
             try {
@@ -135,18 +135,18 @@ public final class LyricOrchestrator {
                     return;
                 }
             } catch (Throwable t) {
-                AndroidLog.logW(TAG, "Hook resolution determined ineffective for " + context.getTrackId() + ": " + t.getMessage());
+                XposedLog.logW(TAG, "Hook resolution determined ineffective for " + context.getTrackId() + ": " + t.getMessage());
                 // Hook 确定无效，触发降级
                 onHookDeterminedInvalid(context);
                 return;
             }
             if (mNetworkEngine != null) {
-                AndroidLog.logI(TAG, "No immediate hook lyrics for " + context.getTrackId() + ", actively requesting via network engine");
+                XposedLog.logI(TAG, "No immediate hook lyrics for " + context.getTrackId() + ", actively requesting via network engine");
                 onHookDeterminedInvalid(context);
                 return;
             }
         } else if (mNetworkEngine != null) {
-            AndroidLog.logI(TAG, "Track changed (NETWORK_ONLY): " + context + ", actively fetching via network engine");
+            XposedLog.logI(TAG, "Track changed (NETWORK_ONLY): " + context + ", actively fetching via network engine");
             startNetworkFetch(context);
         } else {
             fallbackToLegacy(context);
@@ -160,7 +160,7 @@ public final class LyricOrchestrator {
         if (mClosed) return;
         TrackContext current = mCurrentTrack.get();
         if (current == null || !current.getTrackId().equals(context.getTrackId())) {
-            AndroidLog.logD(TAG, "Discard stale hook lyric for: " + context.getTrackId());
+            XposedLog.logD(TAG, "Discard stale hook lyric for: " + context.getTrackId());
             return;
         }
 
@@ -181,7 +181,7 @@ public final class LyricOrchestrator {
         if (mState.get() != State.HOOK_RESOLVING) return;
 
         if (mNetworkEngine != null) {
-            AndroidLog.logI(TAG, "Hook ineffective, falling back to network engine for " + context.getTrackId());
+            XposedLog.logI(TAG, "Hook ineffective, falling back to network engine for " + context.getTrackId());
             startNetworkFetch(context);
         } else {
             fallbackToLegacy(context);
@@ -204,7 +204,7 @@ public final class LyricOrchestrator {
                     TrackContext active = mCurrentTrack.get();
                     if (active != null && active.matches(context.getTrackId(), context.getGeneration())) {
                         if (mState.get() == State.FULL_ACTIVE) {
-                            AndroidLog.logD(TAG, "Network lyric fetched but full lyric already active, skipping overwrite");
+                            XposedLog.logD(TAG, "Network lyric fetched but full lyric already active, skipping overwrite");
                             return;
                         }
                         if (netData != null && netData.hasAllLyrics()) {
@@ -217,7 +217,7 @@ public final class LyricOrchestrator {
             })
             .exceptionally(err -> {
                 synchronized (LyricOrchestrator.this) {
-                    AndroidLog.logW(TAG, "Network fetch failed for " + context.getTrackId(), err);
+                    XposedLog.logW(TAG, "Network fetch failed for " + context.getTrackId(), err);
                     fallbackToLegacy(context);
                 }
                 return null;
@@ -262,7 +262,7 @@ public final class LyricOrchestrator {
             }
         }
 
-        AndroidLog.logI(TAG, "Full lyric active via [" + sourceTag + "] for track=" + context.getTrackId()
+        XposedLog.logI(TAG, "Full lyric active via [" + sourceTag + "] for track=" + context.getTrackId()
             + " | title=" + fullData.getTitle()
             + " | artist=" + fullData.getArtist()
             + " | lines=" + lineCount
@@ -279,12 +279,12 @@ public final class LyricOrchestrator {
      */
     private void fallbackToLegacy(@NonNull TrackContext context) {
         if (mLegacyEngine != null) {
-            AndroidLog.logI(TAG, "All full lyric sources ineffective, falling back to legacy single-line hook for " + context.getTrackId());
+            XposedLog.logI(TAG, "All full lyric sources ineffective, falling back to legacy single-line hook for " + context.getTrackId());
             mState.set(State.LEGACY_FALLBACK);
             mTracker.stop();
             mLegacyEngine.enableLegacyHook();
         } else {
-            AndroidLog.logD(TAG, "No legacy hook available, keeping blank for " + context.getTrackId());
+            XposedLog.logD(TAG, "No legacy hook available, keeping blank for " + context.getTrackId());
             mState.set(State.IDLE);
             mTracker.stop();
             AbsPublisher.publishStop();
@@ -293,7 +293,7 @@ public final class LyricOrchestrator {
 
     public synchronized void onPlaybackStopped() {
         if (mClosed) return;
-        AndroidLog.logD(TAG, "onPlaybackStopped: stopping tracker and resetting orchestrator to IDLE");
+        XposedLog.logD(TAG, "onPlaybackStopped: stopping tracker and resetting orchestrator to IDLE");
         mTracker.stop();
         mTracker.setLyrics(null);
         AbsPublisher.publishStop();

@@ -23,7 +23,7 @@ import android.content.Context;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.hchen.hooktool.log.AndroidLog;
+import com.hchen.hooktool.log.XposedLog;
 import com.hchen.superlyric.publisher.AbsPublisher;
 import com.hchen.superlyric.publisher.engine.INetworkLyricEngine;
 import com.hchen.superlyric.publisher.model.TrackContext;
@@ -137,12 +137,12 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
             },
             new ThreadPoolExecutor.CallerRunsPolicy()
         );
-        AndroidLog.logI(ENGINE_TAG, "Netease proactive network engine initialized (bounded pool 2-6)");
+        XposedLog.logI(ENGINE_TAG, "Netease proactive network engine initialized (bounded pool 2-6)");
     }
 
     @Override
     public void onTrackChanged(@NonNull TrackContext context) {
-        AndroidLog.logI(ENGINE_TAG, "onTrackChanged: trackId=" + context.getTrackId()
+        XposedLog.logI(ENGINE_TAG, "onTrackChanged: trackId=" + context.getTrackId()
             + ", title=" + context.getTitle()
             + ", artist=" + context.getArtist()
             + ", duration=" + context.getDuration());
@@ -176,7 +176,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
     public CompletableFuture<SuperLyricData> fetchFullLyric(@NonNull TrackContext context) {
         if (mClosed) return CompletableFuture.completedFuture(null);
         cancel();
-        AndroidLog.logI(ENGINE_TAG, "fetchFullLyric: [START] trackId=" + context.getTrackId()
+        XposedLog.logI(ENGINE_TAG, "fetchFullLyric: [START] trackId=" + context.getTrackId()
             + ", title=" + context.getTitle()
             + ", artist=" + context.getArtist()
             + ", duration=" + context.getDuration());
@@ -184,10 +184,10 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
         // 1. 优先检查内存 LRU 缓存
         SuperLyricData cached = mLyricCache.get(context.getTrackId());
         if (cached != null && cached.hasAllLyrics()) {
-            AndroidLog.logI(ENGINE_TAG, "fetchFullLyric: [CACHE_MEM_HIT] Found in memory LRU cache for: " + context.getTrackId());
+            XposedLog.logI(ENGINE_TAG, "fetchFullLyric: [CACHE_MEM_HIT] Found in memory LRU cache for: " + context.getTrackId());
             return CompletableFuture.completedFuture(cached);
         }
-        AndroidLog.logD(ENGINE_TAG, "fetchFullLyric: Memory LRU cache missed for: " + context.getTrackId());
+        XposedLog.logD(ENGINE_TAG, "fetchFullLyric: Memory LRU cache missed for: " + context.getTrackId());
 
         CompletableFuture<SuperLyricData> future = new CompletableFuture<>();
         mActiveFuture.set(future);
@@ -196,20 +196,20 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
             initEngine();
         }
 
-        AndroidLog.logD(ENGINE_TAG, "fetchFullLyric: Submitting doFetch to executor pool");
+        XposedLog.logD(ENGINE_TAG, "fetchFullLyric: Submitting doFetch to executor pool");
         mExecutor.execute(() -> {
             try {
                 SuperLyricData data = doFetch(context, future);
                 if (data != null && data.hasAllLyrics()) {
                     mLyricCache.put(context.getTrackId(), data);
-                    AndroidLog.logI(ENGINE_TAG, "fetchFullLyric: [COMPLETE] Successfully fetched and cached in memory for: " + context.getTrackId());
+                    XposedLog.logI(ENGINE_TAG, "fetchFullLyric: [COMPLETE] Successfully fetched and cached in memory for: " + context.getTrackId());
                     future.complete(data);
                 } else {
-                    AndroidLog.logW(ENGINE_TAG, "fetchFullLyric: [COMPLETE] Result empty or incomplete for: " + context.getTrackId());
+                    XposedLog.logW(ENGINE_TAG, "fetchFullLyric: [COMPLETE] Result empty or incomplete for: " + context.getTrackId());
                     future.complete(null);
                 }
             } catch (Throwable t) {
-                AndroidLog.logW(ENGINE_TAG, "fetchFullLyric: [FAILED] Network fetch error for " + context.getTrackId() + ": " + t.getMessage(), t);
+                XposedLog.logW(ENGINE_TAG, "fetchFullLyric: [FAILED] Network fetch error for " + context.getTrackId() + ": " + t.getMessage(), t);
                 future.completeExceptionally(t);
             } finally {
                 mActiveConnection.set(null);
@@ -222,42 +222,42 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
     @Nullable
     private SuperLyricData doFetch(@NonNull TrackContext context, @NonNull CompletableFuture<SuperLyricData> curFuture) {
         if (isCancelled(curFuture)) {
-            AndroidLog.logD(ENGINE_TAG, "doFetch: Cancelled before start for: " + context.getTrackId());
+            XposedLog.logD(ENGINE_TAG, "doFetch: Cancelled before start for: " + context.getTrackId());
             return null;
         }
 
         long musicId = parseNumericId(context.getTrackId());
         if (musicId <= 0L && !context.getTitle().isEmpty()) {
             // 本地曲目或未知 trackId：先智能检索并加权匹配官方最佳 musicId
-            AndroidLog.logI(ENGINE_TAG, "doFetch: trackId non-numeric (" + context.getTrackId() + "), searching musicId for: " + context.getTitle());
+            XposedLog.logI(ENGINE_TAG, "doFetch: trackId non-numeric (" + context.getTrackId() + "), searching musicId for: " + context.getTitle());
             musicId = searchMusicId(context.getTitle(), context.getArtist(), context.getDuration());
-            AndroidLog.logI(ENGINE_TAG, "doFetch: Search resolved musicId=" + musicId + " for: " + context.getTitle());
+            XposedLog.logI(ENGINE_TAG, "doFetch: Search resolved musicId=" + musicId + " for: " + context.getTitle());
         } else {
-            AndroidLog.logI(ENGINE_TAG, "doFetch: Parsed numeric musicId=" + musicId + " from trackId=" + context.getTrackId());
+            XposedLog.logI(ENGINE_TAG, "doFetch: Parsed numeric musicId=" + musicId + " from trackId=" + context.getTrackId());
         }
 
         if (isCancelled(curFuture)) return null;
 
         if (musicId <= 0L) {
-            AndroidLog.logW(ENGINE_TAG, "doFetch: Cannot determine valid NetEase musicId for track: " + context.getTrackId());
+            XposedLog.logW(ENGINE_TAG, "doFetch: Cannot determine valid NetEase musicId for track: " + context.getTrackId());
             return null;
         }
 
         // 2. 检查本地离线磁盘二级缓存 (Disk Cache)
-        AndroidLog.logI(ENGINE_TAG, "doFetch: [CACHE_DISK_CHECK] Checking disk cache for musicId=" + musicId);
+        XposedLog.logI(ENGINE_TAG, "doFetch: [CACHE_DISK_CHECK] Checking disk cache for musicId=" + musicId);
         JSONObject diskJson = readDiskCache(musicId);
         if (diskJson != null) {
             SuperLyricData diskData = parseResponse(musicId, diskJson, context);
             if (diskData != null && diskData.hasAllLyrics()) {
-                AndroidLog.logI(ENGINE_TAG, "doFetch: [CACHE_DISK_HIT] Hit offline disk cache for musicId=" + musicId + " (" + context.getTitle() + ")");
+                XposedLog.logI(ENGINE_TAG, "doFetch: [CACHE_DISK_HIT] Hit offline disk cache for musicId=" + musicId + " (" + context.getTitle() + ")");
                 return diskData;
             }
         }
-        AndroidLog.logI(ENGINE_TAG, "doFetch: [CACHE_DISK_MISS] Disk cache missed for musicId=" + musicId + ", proceeding to network fetch");
+        XposedLog.logI(ENGINE_TAG, "doFetch: [CACHE_DISK_MISS] Disk cache missed for musicId=" + musicId + ", proceeding to network fetch");
 
         if (isCancelled(curFuture)) return null;
 
-        AndroidLog.logI(ENGINE_TAG, "doFetch: [NETWORK_START] Actively fetching from official API: musicId=" + musicId
+        XposedLog.logI(ENGINE_TAG, "doFetch: [NETWORK_START] Actively fetching from official API: musicId=" + musicId
             + ", title=" + context.getTitle());
 
         // 3. 联网拉取首选接口 (带 YRC 逐字和 YTLRC 翻译，HTTPS + Keep-Alive + GZIP + 弱网重试)
@@ -265,14 +265,14 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
         if (isCancelled(curFuture)) return null;
 
         if (root == null || root.optInt("code", 0) != 200) {
-            AndroidLog.logW(ENGINE_TAG, "doFetch: Primary API (interface3) failed or invalid code, falling back to secondary standard API for " + musicId);
+            XposedLog.logW(ENGINE_TAG, "doFetch: Primary API (interface3) failed or invalid code, falling back to secondary standard API for " + musicId);
             root = fetchStandardApi(musicId, curFuture);
         }
 
         if (isCancelled(curFuture)) return null;
 
         if (root == null) {
-            AndroidLog.logW(ENGINE_TAG, "doFetch: All network lyric APIs failed for musicId: " + musicId);
+            XposedLog.logW(ENGINE_TAG, "doFetch: All network lyric APIs failed for musicId: " + musicId);
             return null;
         }
 
@@ -334,21 +334,21 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
                 byte[] postBytes = postData.getBytes(StandardCharsets.UTF_8);
                 conn.setRequestProperty("Content-Length", String.valueOf(postBytes.length));
 
-                AndroidLog.logI(ENGINE_TAG, "[Net-Primary] Connecting to interface3 for musicId=" + musicId);
+                XposedLog.logI(ENGINE_TAG, "[Net-Primary] Connecting to interface3 for musicId=" + musicId);
                 try (OutputStream os = conn.getOutputStream()) {
                     os.write(postBytes);
                     os.flush();
                 }
 
                 int code = conn.getResponseCode();
-                AndroidLog.logI(ENGINE_TAG, "[Net-Primary] HTTP code=" + code + " for musicId=" + musicId);
+                XposedLog.logI(ENGINE_TAG, "[Net-Primary] HTTP code=" + code + " for musicId=" + musicId);
                 if (code == 200) {
                     String responseStr = readStream(conn);
-                    AndroidLog.logI(ENGINE_TAG, "[Net-Primary] Succeeded for musicId=" + musicId + " (payload length=" + responseStr.length() + ")");
+                    XposedLog.logI(ENGINE_TAG, "[Net-Primary] Succeeded for musicId=" + musicId + " (payload length=" + responseStr.length() + ")");
                     writeDiskCacheAsync(mExecutor, musicId, responseStr);
                     return new JSONObject(responseStr);
                 } else {
-                    AndroidLog.logW(ENGINE_TAG, "[Net-Primary] Failed with HTTP " + code + " for musicId=" + musicId);
+                    XposedLog.logW(ENGINE_TAG, "[Net-Primary] Failed with HTTP " + code + " for musicId=" + musicId);
                 }
             } finally {
                 mActiveConnection.compareAndSet(conn, null);
@@ -370,16 +370,16 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
                 conn.setReadTimeout(4000);
                 applyStandardHeaders(conn);
 
-                AndroidLog.logI(ENGINE_TAG, "[Net-Fallback] Connecting to standard lyric API for musicId=" + musicId);
+                XposedLog.logI(ENGINE_TAG, "[Net-Fallback] Connecting to standard lyric API for musicId=" + musicId);
                 int code = conn.getResponseCode();
-                AndroidLog.logI(ENGINE_TAG, "[Net-Fallback] HTTP code=" + code + " for musicId=" + musicId);
+                XposedLog.logI(ENGINE_TAG, "[Net-Fallback] HTTP code=" + code + " for musicId=" + musicId);
                 if (code == 200) {
                     String responseStr = readStream(conn);
-                    AndroidLog.logI(ENGINE_TAG, "[Net-Fallback] Succeeded for musicId=" + musicId + " (payload length=" + responseStr.length() + ")");
+                    XposedLog.logI(ENGINE_TAG, "[Net-Fallback] Succeeded for musicId=" + musicId + " (payload length=" + responseStr.length() + ")");
                     writeDiskCacheAsync(mExecutor, musicId, responseStr);
                     return new JSONObject(responseStr);
                 } else {
-                    AndroidLog.logW(ENGINE_TAG, "[Net-Fallback] Failed with HTTP " + code + " for musicId=" + musicId);
+                    XposedLog.logW(ENGINE_TAG, "[Net-Fallback] Failed with HTTP " + code + " for musicId=" + musicId);
                 }
             } finally {
                 mActiveConnection.compareAndSet(conn, null);
@@ -396,7 +396,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
         // 2. 剥离伴奏/Live/Remix/序号/扩展名等后缀降级检索
         String cleanTitle = cleanSearchKeyword(title);
         if (!cleanTitle.isEmpty() && !cleanTitle.equalsIgnoreCase(title)) {
-            AndroidLog.logI(ENGINE_TAG, "[Search] Retrying search with sanitized title: [" + cleanTitle + "]");
+            XposedLog.logI(ENGINE_TAG, "[Search] Retrying search with sanitized title: [" + cleanTitle + "]");
             id = searchMusicIdInternal(cleanTitle, artist, targetDurationMs);
             if (id > 0L) return id;
         }
@@ -405,7 +405,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
         String mainArtist = extractMainArtist(artist);
         if (!mainArtist.isEmpty() && !mainArtist.equalsIgnoreCase(artist)) {
             String targetTitle = !cleanTitle.isEmpty() ? cleanTitle : title;
-            AndroidLog.logI(ENGINE_TAG, "[Search] Retrying search with main artist: [" + targetTitle + " / " + mainArtist + "]");
+            XposedLog.logI(ENGINE_TAG, "[Search] Retrying search with main artist: [" + targetTitle + " / " + mainArtist + "]");
             id = searchMusicIdInternal(targetTitle, mainArtist, targetDurationMs);
             if (id > 0L) return id;
         }
@@ -427,9 +427,9 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
             conn.setReadTimeout(3000);
             applyStandardHeaders(conn);
 
-            AndroidLog.logI(ENGINE_TAG, "[Search] Requesting query: '" + query + "'");
+            XposedLog.logI(ENGINE_TAG, "[Search] Requesting query: '" + query + "'");
             int code = conn.getResponseCode();
-            AndroidLog.logI(ENGINE_TAG, "[Search] HTTP code=" + code + " for query: '" + query + "'");
+            XposedLog.logI(ENGINE_TAG, "[Search] HTTP code=" + code + " for query: '" + query + "'");
             if (code == 200) {
                 String resStr = readStream(conn);
                 JSONObject json = new JSONObject(resStr);
@@ -438,13 +438,13 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
                     JSONArray songs = result.optJSONArray("songs");
                     if (songs != null && songs.length() > 0) {
                         long bestId = selectBestMatchSongId(songs, title, artist, targetDurationMs);
-                        AndroidLog.logI(ENGINE_TAG, "[Search] Found " + songs.length() + " candidates, best match musicId=" + bestId);
+                        XposedLog.logI(ENGINE_TAG, "[Search] Found " + songs.length() + " candidates, best match musicId=" + bestId);
                         return bestId;
                     }
                 }
             }
         } catch (Throwable t) {
-            AndroidLog.logW(ENGINE_TAG, "[Search] Failed for '" + title + " " + artist + "': " + t.getMessage());
+            XposedLog.logW(ENGINE_TAG, "[Search] Failed for '" + title + " " + artist + "': " + t.getMessage());
         } finally {
             mActiveConnection.compareAndSet(conn, null);
         }
@@ -576,7 +576,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
             try {
                 return supplier.get();
             } catch (Throwable t) {
-                AndroidLog.logD(ENGINE_TAG, apiTag + " attempt " + attempt + " failed: " + t.getMessage());
+                XposedLog.logD(ENGINE_TAG, apiTag + " attempt " + attempt + " failed: " + t.getMessage());
                 if (attempt == 1) {
                     if (isCancelled(curFuture)) {
                         return null;
@@ -656,7 +656,7 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
             }
 
             if (lineList.isEmpty()) {
-                AndroidLog.logW(ENGINE_TAG, "No valid lyric lines extracted for musicId: " + musicId);
+                XposedLog.logW(ENGINE_TAG, "No valid lyric lines extracted for musicId: " + musicId);
                 return null;
             }
 
@@ -674,14 +674,14 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
             fullData.setAllLyrics(lineList.toArray(new SuperLyricLine[0]));
 
             SuperLyricData cleanData = LyricSanitizer.sanitizeData(fullData);
-            AndroidLog.logI(ENGINE_TAG, "Successfully parsed proactive NetEase lyric: musicId=" + musicId
+            XposedLog.logI(ENGINE_TAG, "Successfully parsed proactive NetEase lyric: musicId=" + musicId
                 + ", lines=" + lineList.size()
                 + ", hasWords=" + hasWords
                 + ", hasTrans=" + !transMap.isEmpty()
                 + ", hasRoma=" + !romaMap.isEmpty());
             return cleanData;
         } catch (Throwable t) {
-            AndroidLog.logE(ENGINE_TAG, "Failed to parse NetEase lyric response for " + musicId, t);
+            XposedLog.logE(ENGINE_TAG, "Failed to parse NetEase lyric response for " + musicId, t);
             return null;
         }
     }
@@ -1076,23 +1076,23 @@ public class NeteaseNetworkLyricEngine implements INetworkLyricEngine {
     private static JSONObject readDiskCache(long musicId) {
         try {
             Context ctx = AbsPublisher.getAppContext();
-            AndroidLog.logD(ENGINE_TAG, "readDiskCache: Querying LyricCacheStore for musicId=" + musicId
+            XposedLog.logD(ENGINE_TAG, "readDiskCache: Querying LyricCacheStore for musicId=" + musicId
                 + ", ctx=" + (ctx != null ? ctx.getPackageName() : "null"));
             String jsonStr = LyricCacheStore.get(ctx, PROVIDER_NAME, String.valueOf(musicId));
             if (jsonStr != null && !jsonStr.trim().isEmpty()) {
-                AndroidLog.logI(ENGINE_TAG, "readDiskCache: Successfully loaded cached JSON (" + jsonStr.length() + " chars) for musicId=" + musicId);
+                XposedLog.logI(ENGINE_TAG, "readDiskCache: Successfully loaded cached JSON (" + jsonStr.length() + " chars) for musicId=" + musicId);
                 return new JSONObject(jsonStr);
             }
-            AndroidLog.logD(ENGINE_TAG, "readDiskCache: Missed disk cache for musicId=" + musicId);
+            XposedLog.logD(ENGINE_TAG, "readDiskCache: Missed disk cache for musicId=" + musicId);
         } catch (Throwable t) {
-            AndroidLog.logW(ENGINE_TAG, "readDiskCache: Failed for " + musicId + ": " + t.getMessage(), t);
+            XposedLog.logW(ENGINE_TAG, "readDiskCache: Failed for " + musicId + ": " + t.getMessage(), t);
         }
         return null;
     }
 
     private static void writeDiskCacheAsync(@Nullable ExecutorService executor, long musicId, @NonNull String jsonStr) {
         Context ctx = AbsPublisher.getAppContext();
-        AndroidLog.logI(ENGINE_TAG, "writeDiskCacheAsync: Submitting cache write for musicId=" + musicId
+        XposedLog.logI(ENGINE_TAG, "writeDiskCacheAsync: Submitting cache write for musicId=" + musicId
             + " (payload length=" + jsonStr.length() + "), ctx=" + (ctx != null ? ctx.getPackageName() : "null"));
         LyricCacheStore.putAsync(executor, ctx, PROVIDER_NAME, String.valueOf(musicId), jsonStr);
     }

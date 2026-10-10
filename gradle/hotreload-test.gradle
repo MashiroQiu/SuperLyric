@@ -1,0 +1,8 @@
+gradle.beforeProject { p ->
+    p.pluginManager.withPlugin('com.android.application') {
+        p.androidComponents.finalizeDsl { android ->
+            android.buildTypes.getByName('release').minifyEnabled = false
+            android.buildTypes.getByName('release').shrinkResources = false
+        }
+    }
+}

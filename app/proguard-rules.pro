@@ -43,3 +43,6 @@
 -keep class io.github.proify.lyricon.provider.CentralServiceReceiver { *; }
 -keep class io.github.proify.lyricon.provider.impl.ProviderV27Impl { *; }
 -keep class io.github.proify.lyricon.provider.impl.RemoteServiceProxy { *; }
+
+# Preserve the same entry contract as the original HookTool entrance after changing its base.
+-keep class * extends com.hchen.hooktool.ReloadModuleEntrance { *; }

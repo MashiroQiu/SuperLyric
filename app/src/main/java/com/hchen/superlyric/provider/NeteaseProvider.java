@@ -24,7 +24,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.hchen.hooktool.hook.AbsHook;
-import com.hchen.hooktool.log.AndroidLog;
+import com.hchen.hooktool.log.XposedLog;
 import com.hchen.processor.HookThis;
 import com.hchen.superlyric.provider.netease.NeteaseNetworkLyricEngine;
 import com.hchen.superlyric.publisher.UnifiedLyricProvider;
@@ -100,13 +100,13 @@ public class NeteaseProvider extends UnifiedLyricProvider {
                     public void before() {
                         if (Objects.equals("com.netease.nis.wrapper.MyApplication", getArg(1))) {
                             setArg(1, "com.netease.cloudmusic.CloudMusicApplication");
-                            AndroidLog.logI(TAG, "Bypassed NetEase wrapper class to CloudMusicApplication");
+                            XposedLog.logI(TAG, "Bypassed NetEase wrapper class to CloudMusicApplication");
                         }
                     }
                 }
             );
         } catch (Throwable t) {
-            AndroidLog.logW(TAG, "Failed to hook Instrumentation.newApplication: " + t.getMessage());
+            XposedLog.logW(TAG, "Failed to hook Instrumentation.newApplication: " + t.getMessage());
         }
     }
 

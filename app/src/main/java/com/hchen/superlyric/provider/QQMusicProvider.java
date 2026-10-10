@@ -27,7 +27,7 @@ import androidx.annotation.Nullable;
 import com.hchen.dexkitcache.DexkitCache;
 import com.hchen.dexkitcache.IDexkit;
 import com.hchen.hooktool.hook.AbsHook;
-import com.hchen.hooktool.log.AndroidLog;
+import com.hchen.hooktool.log.XposedLog;
 import com.hchen.processor.HookThis;
 import com.hchen.superlyric.publisher.UnifiedLyricProvider;
 import com.hchen.superlyric.publisher.engine.IHookLyricEngine;
@@ -90,6 +90,33 @@ public class QQMusicProvider extends UnifiedLyricProvider {
     private volatile String mLastProcessedTrackId = null;
     private volatile boolean mLastHadWords = false;
     private volatile int mLastLineCount = 0;
+    private volatile SuperLyricData mCapturedFullLyric;
+
+    @Override
+    public android.os.Bundle saveReloadState() {
+        android.os.Bundle state = new android.os.Bundle();
+        SuperLyricData captured = mCapturedFullLyric;
+        if (captured != null) {
+            android.os.Parcel parcel = android.os.Parcel.obtain();
+            try {
+                captured.writeToParcel(parcel, 0);
+                state.putByteArray("fullLyric", parcel.marshall());
+            } finally { parcel.recycle(); }
+        }
+        return state;
+    }
+
+    @Override
+    public void restoreReloadState(android.os.Bundle state) {
+        byte[] bytes = state.getByteArray("fullLyric");
+        if (bytes == null) return;
+        android.os.Parcel parcel = android.os.Parcel.obtain();
+        try {
+            parcel.unmarshall(bytes, 0, bytes.length);
+            parcel.setDataPosition(0);
+            mCapturedFullLyric = SuperLyricData.CREATOR.createFromParcel(parcel);
+        } finally { parcel.recycle(); }
+    }
 
     // 自适应反射字段缓存（按行与词元 Class 隔离，零混淆硬编码，数学拓扑推导）
     private final Map<Class<?>, LineFieldResolver> mLineResolvers = new ConcurrentHashMap<>();
@@ -118,8 +145,16 @@ public class QQMusicProvider extends UnifiedLyricProvider {
             @Nullable
             @Override
             public SuperLyricData tryExtractFullLyric(@NonNull TrackContext context) {
-                // 异步反序列化回调驱动，歌词就绪时通过 Hook 拦截即时上报
-                return null;
+                SuperLyricData captured = mCapturedFullLyric;
+                if (captured == null || !QQCaptureSupport.sameSong(captured.getLyricId(),
+                    captured.getTitle(), captured.getArtist(), context.getTrackId(),
+                    context.getTitle(), context.getArtist())) return null;
+                // MediaSession may arrive after the bean or use a different song ID.
+                // Rebind a fresh packet to the current generation without mutating the cache.
+                return new SuperLyricData().setTitle(context.getTitle()).setArtist(context.getArtist())
+                    .setAlbum(context.getAlbum()).setLyricId(context.getTrackId())
+                    .setDuration(context.getDuration() > 0 ? context.getDuration() : captured.getDuration())
+                    .setAllLyrics(captured.getAllLyrics());
             }
         };
     }
@@ -160,7 +195,7 @@ public class QQMusicProvider extends UnifiedLyricProvider {
     private void hookLyricLoadBeanInit() {
         String proc = getProcessNameCompat();
         if (proc != null && proc.contains(":") && !proc.endsWith(":QQPlayerService")) {
-            AndroidLog.logD(TAG, "Skipping LyricLoadBean hook in non-playback sub-process: " + proc);
+            XposedLog.logD(TAG, "Skipping LyricLoadBean hook in non-playback sub-process: " + proc);
             return;
         }
 
@@ -175,7 +210,7 @@ public class QQMusicProvider extends UnifiedLyricProvider {
                         )
                     );
                     if (beanClasses == null || beanClasses.isEmpty()) {
-                        AndroidLog.logW(TAG, "DexKit failed to locate LyricLoadBean class");
+                        XposedLog.logW(TAG, "DexKit failed to locate LyricLoadBean class");
                         return null;
                     }
                     return beanClasses.get(0);
@@ -183,8 +218,9 @@ public class QQMusicProvider extends UnifiedLyricProvider {
             });
 
             if (beanClass != null) {
+                int installed = 0;
                 for (Constructor<?> c : beanClass.getDeclaredConstructors()) {
-                    if (c.getParameterCount() == 8) {
+                    if (QQCaptureSupport.lyricConstructor(c.getParameterTypes())) {
                         c.setAccessible(true);
                         hook(c, new AbsHook() {
                             @Override
@@ -196,13 +232,16 @@ public class QQMusicProvider extends UnifiedLyricProvider {
                                 handleCapturedLyrics(songInfo, mainLyric, transLyric, romaLyric, "LyricLoadBean.<init>");
                             }
                         });
-                        AndroidLog.logI(TAG, "Hooked LyricLoadBean constructor successfully");
-                        break;
+                        XposedLog.logI(TAG, "Hooked LyricLoadBean constructor successfully");
+                        installed++;
                     }
                 }
+                if (installed == 0) XposedLog.logW(TAG, "No compatible LyricLoadBean constructor in " + beanClass.getName());
+            } else {
+                XposedLog.logW(TAG, "LyricLoadBean unavailable: lyric capture hook was not installed");
             }
         } catch (Throwable t) {
-            AndroidLog.logW(TAG, "Failed to hook LyricLoadBean constructor: " + t.getMessage());
+            XposedLog.logW(TAG, "Failed to hook LyricLoadBean constructor: " + t.getMessage(), t);
         }
     }
 
@@ -216,20 +255,11 @@ public class QQMusicProvider extends UnifiedLyricProvider {
                                       @NonNull String source) {
         if (mainLyric == null) return;
 
-        // 多进程协同防护：
-        // QQ 音乐的主进程 (com.tencent.qqmusic) 为纯 UI 层，真正的音频播放中枢与 MediaSession 均在 :QQPlayerService 中。
-        // 若当前处于主 UI 进程且未托管 MediaSession (mActiveTrack.get() == null)，严禁分发未锚定的歌词，防止污染播放进程的数据
-        String processName = getProcessNameCompat();
-        if (processName != null && !processName.endsWith(":QQPlayerService") && mActiveTrack.get() == null) {
-            AndroidLog.logD(TAG, "Ignoring captured lyrics from non-player process (" + processName + ")");
-            return;
-        }
-
         try {
             // 1. 提取行列表
             List<ParsedLine> parsedLines = extractLines(mainLyric);
             if (parsedLines == null || parsedLines.isEmpty()) {
-                AndroidLog.logW(TAG, "[" + source + "] No lines extracted from main lyric");
+                XposedLog.logW(TAG, "[" + source + "] No lines extracted from main lyric");
                 return;
             }
 
@@ -239,7 +269,7 @@ public class QQMusicProvider extends UnifiedLyricProvider {
 
             // 若关键元数据严重缺失或异常，绝不分发残缺包
             if (meta.title.isEmpty()) {
-                AndroidLog.logW(TAG, "[" + source + "] Dropping lyrics with empty title");
+                XposedLog.logW(TAG, "[" + source + "] Dropping lyrics with empty title");
                 return;
             }
 
@@ -294,7 +324,14 @@ public class QQMusicProvider extends UnifiedLyricProvider {
 
             SuperLyricData cleanData = LyricSanitizer.sanitizeData(data);
             if (cleanData == null) {
-                AndroidLog.logW(TAG, "[" + source + "] Sanitized lyric data is null for " + meta.trackId);
+                XposedLog.logW(TAG, "[" + source + "] Sanitized lyric data is null for " + meta.trackId);
+                return;
+            }
+            mCapturedFullLyric = cleanData;
+            // Cache early beans; only metadata-anchored captures may publish. A following
+            // MediaSession update resolves this cache instead of leaving the UI at ON_STOP.
+            if (mActiveTrack.get() == null) {
+                XposedLog.logI(TAG, "Cached full lyric before MediaSession metadata: " + meta.trackId);
                 return;
             }
 
@@ -314,14 +351,14 @@ public class QQMusicProvider extends UnifiedLyricProvider {
                 mOrchestrator.onHookFullLyricCaptured(context, cleanData);
             }
 
-            AndroidLog.logI(TAG, "[" + source + "] Successfully captured QQMusic lyrics: trackId=" + meta.trackId
+            XposedLog.logI(TAG, "[" + source + "] Successfully captured QQMusic lyrics: trackId=" + meta.trackId
                 + ", title=" + meta.title
                 + ", artist=" + meta.artist
                 + ", lines=" + lyricLines.length
                 + ", hasWords=" + hasWords
                 + ", hasTrans=" + hasTrans);
         } catch (Throwable t) {
-            AndroidLog.logE(TAG, "[" + source + "] Error handling captured lyrics", t);
+            XposedLog.logE(TAG, "[" + source + "] Error handling captured lyrics", t);
         }
     }
 
@@ -345,7 +382,7 @@ public class QQMusicProvider extends UnifiedLyricProvider {
         }
 
         if (resolver == null || !resolver.isValid()) {
-            AndroidLog.logW(TAG, "Failed to resolve required lyric line fields for: " + sample.getClass().getName());
+            XposedLog.logW(TAG, "Failed to resolve required lyric line fields for: " + sample.getClass().getName());
             return null;
         }
 
@@ -371,7 +408,7 @@ public class QQMusicProvider extends UnifiedLyricProvider {
 
                 list.add(new ParsedLine(text, startMs, endMs, words));
             } catch (Throwable t) {
-                AndroidLog.logW(TAG, "Error extracting single line: " + t.getMessage());
+                XposedLog.logW(TAG, "Error extracting single line: " + t.getMessage());
             }
         }
 
@@ -763,7 +800,7 @@ public class QQMusicProvider extends UnifiedLyricProvider {
 
                 wordList.add(new SuperLyricWord(text, absStart, absEnd));
             } catch (Throwable t) {
-                AndroidLog.logW(TAG, "extractWords: error extracting word: " + t.getMessage());
+                XposedLog.logW(TAG, "extractWords: error extracting word: " + t.getMessage());
             }
         }
 

@@ -401,7 +401,9 @@ public abstract class ReloadModuleEntrance extends XposedModule {
 
     private void hookApplication(@NonNull PackageLoadedParam param) {
         if (param.isFirstPackage()) {
-            if (TextUtils.equals(param.getPackageName(), processName)) {
+            // A first package also owns Application.attach in :QQPlayerService and other
+            // named subprocesses. Its package name is not the full process name.
+            if (ProcessPackages.belongsTo(param.getPackageName(), processName)) {
                 if (handle != null) {
                     handle.unhook();
                     handle = null;

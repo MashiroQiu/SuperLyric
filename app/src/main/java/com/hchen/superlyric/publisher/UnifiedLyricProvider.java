@@ -93,9 +93,11 @@ public abstract class UnifiedLyricProvider extends AbsPublisher implements AutoC
      * 默认通过 Hook 系统的 MediaSession 捕获基础元数据与播放状态。
      */
     protected void hookMediaSession() {
-        hookMethod("android.media.session.MediaSession",
+        // New Android builds expose/internalize metadata overloads. Hook the actual setter
+        // overloads too, instead of relying on the one-argument forwarding method remaining
+        // uninlined. The orchestrator already deduplicates nested calls for the same track.
+        hookAllMethod("android.media.session.MediaSession",
             "setMetadata",
-            "android.media.MediaMetadata",
             new AbsHook() {
                 @Override
                 public void after() {
@@ -167,6 +169,10 @@ public abstract class UnifiedLyricProvider extends AbsPublisher implements AutoC
         // Registration is just this live host PID, not an old-generation object. Keep it so
         // system_server retains the full song/clock while the publisher generation is swapped.
     }
+
+    /** Only framework values/serialized bytes may cross a module generation. */
+    public android.os.Bundle saveReloadState() { return new android.os.Bundle(); }
+    public void restoreReloadState(android.os.Bundle state) {}
 
     /** Seed network resolution/clock from the currently playing host MediaSession after reload. */
     public void resumeAfterReload(Context context) {

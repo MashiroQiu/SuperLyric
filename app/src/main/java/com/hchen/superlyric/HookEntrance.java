@@ -241,9 +241,14 @@ public final class HookEntrance extends ReloadModuleEntrance {
         });
         saved.put("packages", packages);
         if (modules.containsKey("com.android.systemui")) LyriconBridge.close();
-        for (List<AbsModule> value : modules.values()) for (AbsModule module : value) {
-            if (module instanceof UnifiedLyricProvider provider) provider.close();
+        Map<String, Object> providerStates = new HashMap<>();
+        for (Map.Entry<String, List<AbsModule>> entry : modules.entrySet()) for (AbsModule module : entry.getValue()) {
+            if (module instanceof UnifiedLyricProvider provider) {
+                providerStates.put(entry.getKey() + "/" + module.getClass().getName(), provider.saveReloadState());
+                provider.close();
+            }
         }
+        saved.put("providerStates", providerStates);
         saved.put("systemService", SuperLyricProxy.retireAndSave());
         ReloadResources.stop(cacheMigrationExecutor);
         modules.clear();
@@ -286,6 +291,13 @@ public final class HookEntrance extends ReloadModuleEntrance {
                 public AppComponentFactory getAppComponentFactory() { return (AppComponentFactory) item.get("factory"); }
             });
         });
+        Map<String, Object> providerStates = (Map<String, Object>) saved.get("providerStates");
+        if (providerStates != null) {
+            for (Map.Entry<String, List<AbsModule>> entry : modules.entrySet()) for (AbsModule module : entry.getValue()) {
+                Object state = providerStates.get(entry.getKey() + "/" + module.getClass().getName());
+                if (module instanceof UnifiedLyricProvider provider && state instanceof Bundle bundle) provider.restoreReloadState(bundle);
+            }
+        }
         Context context = (Context) saved.get("context");
         if (context != null) {
             ReloadResources.onMain(() -> { handleApplicationCreated(context); return null; });
