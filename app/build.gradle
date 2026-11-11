@@ -42,8 +42,8 @@ android {
         minSdk 30
         targetSdk 37
         // noinspection HighAppVersionCode
-        versionCode 2026111101
-        versionName "4.1-api102-lyricon"
+        versionCode 2026111102
+        versionName "4.1-api102-recovery-r2"
 
         ndk {
             // noinspection ChromeOsAbiSupport
