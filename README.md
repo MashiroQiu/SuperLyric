@@ -1,15 +1,16 @@
-配套测试版：SuperLyric 4.1 上游新架构 + API102 热重载 + Lyricon 对接，以及 Lyricon 后台调度优化。
+R2 配套修复测试版。
 
-重要：使用新的测试签名，不能覆盖旧签名 APK。先在旧 Lyricon 设置中导出配置、保留旧 APK，再替换两模块并启用作用域，重启一次。后续使用相同新签名的覆盖更新测试免重启热重载。详见安装说明。
+SuperLyric 恢复异步连接后的歌曲/播放状态重放，补齐输出连接失败重试、开机输入订阅退避重试和解锁恢复，防止延迟快照覆盖较新的实时事件。覆盖“第二个播放器打断”和“先暂停第一个、再播放第二个”的连接时序。
 
-完整回归测试：SuperLyric 474 项、Lyricon 117 项通过；两边 debug/release 构建、签名与最终 DEX 契约检查通过。发布的 release 测试包未混淆，保留原刷新率和特效。没有连接手机，尚未实测耗电下降、显示一致性或 ART/Binder 热重载效果。
+Lyricon 完成逐字高亮、渐变、滚动等待、切句、翻译布局、图标/封面和控制面板动画代码审查。复用 Java 渐变对象和矩阵、移除重复重绘与父布局动画、清理过期切句及隐藏动画。保留原刷新率、逐字高亮、图标、超级岛/摄像头边距和原有设置。Android 渐隐边的离屏合成成本仍保留，以保持透明度与外观。
 
-- [SuperLyric APK](https://github.com/MashiroQiu/SuperLyric/raw/refs/heads/apk-20261111-paired/SuperLyric-4.1-upstream-api102-release.apk)
-- [Lyricon APK](https://github.com/MashiroQiu/lyricon/raw/refs/heads/apk-20261111-paired/Lyricon-1.0.40-power-api102-release.apk)
-- [安装、配置备份与耗电检测说明](https://github.com/MashiroQiu/SuperLyric/blob/integrate/upstream-hot-reload-20261111/docs/POWER-AND-UPGRADE-20261111.md)
-- [SuperLyric 源码](https://github.com/MashiroQiu/SuperLyric/tree/integrate/upstream-hot-reload-20261111)
-- [Lyricon 源码](https://github.com/MashiroQiu/lyricon/tree/integrate/power-paired-20261111)
+SuperLyric 477 项、Lyricon 125 项 JVM 测试通过，两边 debug/release 编译通过，release APK 签名与 API102 契约检查通过。测试不等于手机验证；尚无 CPU/耗电下降、开机切换恢复或热重载的设备实测结论。
 
-SuperLyric 上游 359238e 已作为合并父提交纳入，旧可用分支保留。迁移到两代稳定 Binder、序列化状态恢复、4.0 歌词/翻译/罗马音输出；清理退出的 SDK 回调、死亡监听和工作线程。Lyricon 保留超级岛/摄像头边距、隐藏规则、图标和翻译逻辑，停止暂停/熄屏空转并复用不可变着色器。
+这两个 APK 沿用上一套 paired-api102-20261111 的签名，可以覆盖该版本，无需卸载。发布为未混淆的 release 测试包。更早的旧签名包仍不能直接覆盖。
 
-SHA256: `73bd748e09db018bbe3d9ac721eb175b0df921cee90747859cc212c35b15d327`
+- [SuperLyric R2 APK](https://github.com/MashiroQiu/SuperLyric/raw/refs/heads/apk-20261111-paired/SuperLyric-4.1-recovery-r2-release.apk)
+- [Lyricon R2 APK](https://github.com/MashiroQiu/lyricon/raw/refs/heads/apk-20261111-paired/Lyricon-1.0.40-render-r2-release.apk)
+- [播放器连接修复说明](https://github.com/MashiroQiu/SuperLyric/blob/integrate/upstream-hot-reload-20261111/docs/PLAYER-RECOVERY-R2.md)
+- [动画审查与保留成本](https://github.com/MashiroQiu/lyricon/blob/integrate/power-paired-20261111/docs/ANIMATION-AUDIT-R2.md)
+
+请重点比较：开机后直接播放；播放中换播放器；暂停第一个后播放第二个；切回第一个；锁屏再解锁。CPU 对比请保持同一首歌、相同效果、刷新率和前台界面，分别记录稳定播放和暂停各 30 秒。若仍异常，可用仓库 tools/lyrics-power-trace.pbtxt 获取包含 Lyricon.wordDraw / Lyricon.scrollDraw 标记的 Perfetto 记录。
