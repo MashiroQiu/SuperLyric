@@ -18,8 +18,8 @@
  */
 package com.hchen.superlyric.ui.viewmodel
 
-import android.annotation.SuppressLint
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.compose.ui.util.fastFirstOrNull
 import androidx.core.content.edit
 import androidx.lifecycle.ViewModel
@@ -30,8 +30,8 @@ import com.hchen.superlyric.data.PrefsKey
 import com.hchen.superlyric.data.apps.ApiAppData
 import com.hchen.superlyric.ui.Application
 import com.hchen.superlyric.utils.PackageLoader
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -93,6 +93,9 @@ class MainViewModel(
             runCatching {
                 val level = sharedPreferences.getInt(PrefsKey.LOG_LEVEL, 0)
                 _logLevel.value = level
+            }.onFailure {
+                // 读取失败必须记录，否则无法区分默认值与读取异常
+                Log.w("MainViewModel", "Failed to read the log level", it)
             }
         }
     }
@@ -102,8 +105,12 @@ class MainViewModel(
             is MainUiAction.UpdateLogLevel -> {
                 val currentPrefs = Application.getRemotePreferences() ?: prefs
                 if (currentPrefs != null) {
+                    // KTX 的 edit {} 不返回写入结果，状态无法在失败时回退；跨进程的
+                    // remote prefs 仍可能抛异常，异常必须记录，否则界面会显示未写入的值
                     runCatching {
                         currentPrefs.edit { putInt(PrefsKey.LOG_LEVEL, action.value) }
+                    }.onFailure {
+                        Log.w("MainViewModel", "Failed to persist the log level", it)
                     }
                     _logLevel.value = action.value
                 }
@@ -121,17 +128,18 @@ class MainViewModel(
                 runCatching {
                     reloadApps().awaitCompletion()
                 }.onFailure { e ->
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    android.util.Log.e("MainViewModel", "Failed to reload apps", e)
+                    if (e is CancellationException) throw e
+                    Log.e("MainViewModel", "Failed to reload apps", e)
                 }
                 loadApps()
 
-                delay(300)
+                // PackageLoader 先写入 sMediaApps/sMediaApiApps 再 complete future；
+                // awaitCompletion 返回时列表已更新，无需额外等待
                 val targetPkg = _currentApp.value.packageName
                 if (!targetPkg.isNullOrEmpty()) {
                     _currentApp.value = _hookApps.value.fastFirstOrNull { it.packageName == targetPkg }
                         ?: _apiApps.value.fastFirstOrNull { it.packageName == targetPkg }
-                        ?: AppData()
+                                ?: AppData()
                 }
             } finally {
                 _isRefreshing.value = false
@@ -139,9 +147,7 @@ class MainViewModel(
         }
     }
 
-    @SuppressLint("EmptySuperCall")
     override fun onCleared() {
-        super.onCleared()
         removePrefsReadyListener(prefsReadyListener)
         removeAppLoadedListener(appLoadedListener)
         prefs = null

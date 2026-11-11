@@ -24,6 +24,8 @@ public final class LyriconReceiver extends AbsModule {
 
     @Override
     protected void onApplicationCreated(@NonNull Context context) {
-        LyriconBridge.start(context);
+        if (context.getPackageName().equals(android.app.Application.getProcessName())) {
+            LyriconBridge.start(context);
+        }
     }
 }

@@ -21,9 +21,9 @@ package com.hchen.superlyric.ui.screen
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import android.widget.Toast
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -51,28 +52,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.graphics.drawable.toBitmap
 import androidx.core.net.toUri
 import com.hchen.superlyric.BuildConfig
 import com.hchen.superlyric.R
+import com.hchen.superlyric.ui.data.LocalPagerState
+import com.hchen.superlyric.ui.data.UIConstants
 import com.hchen.superlyric.ui.effect.BgEffectBackground
 import com.hchen.superlyric.ui.effect.BlurredBar
-import com.hchen.superlyric.ui.effect.blend.ColorBlendToken
 import com.hchen.superlyric.ui.effect.cardBlur
+import com.hchen.superlyric.ui.effect.cardBlendColors
 import com.hchen.superlyric.ui.effect.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -87,7 +88,6 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurBlendMode
 import top.yukonga.miuix.kmp.blur.BlurDefaults
-import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.preference.ArrowPreference
@@ -96,51 +96,33 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import top.yukonga.miuix.kmp.window.WindowDialog
 
+private data class Contributor(
+    val name: String,
+    val url: String,
+    @DrawableRes val icon: Int,
+)
+
 @Composable
 @SuppressLint("LocalContextGetResourceValueCall")
 fun AboutLayout(
     paddingValues: PaddingValues,
-    isWideScreen: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
-    val iconPainter = remember(context) {
-        BitmapPainter(
-            context.packageManager
-                .getApplicationIcon(context.packageName)
-                .toBitmap()
-                .asImageBitmap()
-        )
-    }
-
-    val contributor = remember {
+    val contributors = remember {
         listOf(
-            "ghhccghk",
-            "YifePlayte",
-            "YuKongA",
-            "AnserJim"
-        )
-    }
-    val contributorUri = remember {
-        listOf(
-            "https://github.com/ghhccghk",
-            "https://github.com/YifePlayte",
-            "https://github.com/YuKongA",
-            "https://github.com/killerprojecte"
-        )
-    }
-    val contributorIcon = remember {
-        listOf(
-            R.drawable.ghhccghk,
-            R.drawable.yifeplayte,
-            R.drawable.yukonga,
-            R.drawable.anserjim
+            Contributor("ghhccghk", "https://github.com/ghhccghk", R.drawable.ghhccghk),
+            Contributor("YifePlayte", "https://github.com/YifePlayte", R.drawable.yifeplayte),
+            Contributor("YuKongA", "https://github.com/YuKongA", R.drawable.yukonga),
+            Contributor("AnserJim", "https://github.com/killerprojecte", R.drawable.anserjim),
+            Contributor("BlueEve04", "https://github.com/BlueEve04", R.drawable.blueeve04),
         )
     }
 
     var isContributorsDialogShowing by remember { mutableStateOf(false) }
 
+    val pagerState = LocalPagerState.current
     val scrollBehavior = MiuixScrollBehavior()
     val lazyListState = rememberLazyListState()
     val scrollProgress by remember {
@@ -161,7 +143,7 @@ fun AboutLayout(
     }
 
     val isInDark = isSystemInDarkTheme()
-    val cardBlend = if (isInDark) ColorBlendToken.Overlay_Thin_Light else ColorBlendToken.Pured_Regular_Light
+    val cardBlend = cardBlendColors(isInDark)
     val logoBlend = remember(isInDark) {
         if (isInDark) {
             listOf(
@@ -180,8 +162,20 @@ fun AboutLayout(
 
     val backdrop = rememberBlurBackdrop()
     val barBackdrop = rememberBlurBackdrop()
-    // Defer the frame-rate scroll read out of composition: these booleans only flip at the
-    // single 1f threshold, so derivedStateOf recomposes the bar on flip rather than every frame.
+    val logoEffect = if (backdrop != null) {
+        Modifier.textureBlur(
+            backdrop = backdrop,
+            shape = RoundedCornerShape(24.dp),
+            blurRadius = 150f,
+            noiseCoefficient = BlurDefaults.NoiseCoefficient,
+            colors = BlurDefaults.blurColors(blendColors = logoBlend),
+            contentBlendMode = BlendMode.DstIn,
+        )
+    } else {
+        Modifier
+    }
+    // 把逐帧变化的滚动状态收窄为两个布尔量：它们只在 1f 阈值翻转时触发重组，
+    // 顶栏不会随每一帧重组
     val collapsed by remember { derivedStateOf { scrollProgress == 1f } }
     val blurActive by remember(barBackdrop) { derivedStateOf { barBackdrop != null && scrollProgress == 1f } }
 
@@ -222,7 +216,7 @@ fun AboutLayout(
     ) { pv ->
         Box(modifier = if (barBackdrop != null) Modifier.layerBackdrop(barBackdrop) else Modifier) {
             BgEffectBackground(
-                dynamicBackground = true,
+                dynamicBackground = pagerState.currentPage == UIConstants.ABOUT_PAGE_INDEX,
                 isOs3Effect = true,
                 isFullSize = false,
                 modifier = Modifier.fillMaxSize(),
@@ -238,25 +232,19 @@ fun AboutLayout(
                         },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
+                    Icon(
                         modifier = Modifier
-                            .size(88.dp)
+                            .size(132.dp)
                             .graphicsLayer {
-                                clip = true
-                                shape = RoundedCornerShape(16.dp)
                                 alpha = 1 - iconProgress
                                 scaleX = 1 - (iconProgress * 0.05f)
                                 scaleY = 1 - (iconProgress * 0.05f)
                             }
-                            .background(Color.White),
-                    ) {
-                        Image(
-                            modifier = Modifier.size(88.dp),
-                            painter = iconPainter,
-                            contentDescription = null,
-                        )
-                    }
+                            .then(logoEffect),
+                        painter = painterResource(R.drawable.ic_superlyric_logo),
+                        contentDescription = null,
+                        tint = if (backdrop != null) Color.White else MiuixTheme.colorScheme.onBackground,
+                    )
                     Text(
                         modifier = Modifier
                             .padding(top = 12.dp, bottom = 5.dp)
@@ -440,38 +428,52 @@ fun AboutLayout(
                     isContributorsDialogShowing = false
                 }
             ) {
+                // 列表上限同时给标题与确认按钮留出空间；小窗/横屏也能完整显示
+                val listMaxHeight = (LocalWindowInfo.current.containerDpSize.height * 0.45f)
+                    .coerceIn(220.dp, 300.dp)
+
                 Card(
+                    modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.defaultColors(
                         color = MiuixTheme.colorScheme.secondaryContainer,
                     )
                 ) {
-                    contributor.forEachIndexed { index, name ->
-                        ArrowPreference(
-                            title = name,
-                            summary = "Github | Contributor",
-                            startAction = {
-                                Box(Modifier.padding(end = 8.dp)) {
-                                    Icon(
-                                        painter = painterResource(contributorIcon[index]),
-                                        contentDescription = name,
-                                        tint = Color.Unspecified,
-                                        modifier = Modifier
-                                            .size(48.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                    )
+                    LazyColumn(
+                        state = rememberLazyListState(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = listMaxHeight)
+                            .scrollEndHaptic()
+                            .overScrollVertical()
+                    ) {
+                        items(contributors, key = { it.name }) { contributor ->
+                            ArrowPreference(
+                                title = contributor.name,
+                                summary = "Github | Contributor",
+                                startAction = {
+                                    Box(Modifier.padding(end = 8.dp)) {
+                                        Icon(
+                                            painter = painterResource(contributor.icon),
+                                            contentDescription = contributor.name,
+                                            tint = Color.Unspecified,
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    openUrl(context, contributor.url)
                                 }
-                            },
-                            onClick = {
-                                openUrl(context, contributorUri[index])
-                            }
-                        )
+                            )
+                        }
                     }
                 }
 
                 Spacer(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .size(12.dp)
+                        .height(12.dp)
                 )
 
                 Row(horizontalArrangement = Arrangement.Absolute.SpaceBetween) {
@@ -499,7 +501,10 @@ private fun openUrl(context: Context, url: String) {
         }
 
         context.startActivity(intent)
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        // 原因必须留痕：无浏览器处理该 scheme、URI 非法、Activity 未导出都会抛异常，
+        // Toast 无法区分它们
+        Log.w("AboutLayout", "Failed to open url $url", e)
         Toast.makeText(context, R.string.no_activity, Toast.LENGTH_SHORT).show()
     }
 }

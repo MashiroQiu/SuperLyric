@@ -43,14 +43,12 @@ internal class BgEffectPainter(
     private val pointsAnimBuffer = FloatArray(8)
 
     private var animTime = Float.NaN
-    private var isDarkCached: Boolean? = null
-    private var deviceTypeCached: DeviceType? = null
-
-    private var presetApplied = false
 
     private var cachedLogoHeight = Float.NaN
     private var cachedTotalHeight = Float.NaN
     private var cachedTotalWidth = Float.NaN
+
+    private var cachedPreset: BgEffectConfig.Config? = null
 
     private var cachedColorStage = Float.NaN
     private var cachedColorsPreset: BgEffectConfig.Config? = null
@@ -148,22 +146,20 @@ internal class BgEffectPainter(
         cachedTotalWidth = totalWidth
     }
 
-    fun updatePresetIfNeeded(deviceType: DeviceType, isDark: Boolean) {
-        if (presetApplied && isDarkCached == isDark && deviceTypeCached == deviceType) return
-
-        applyPreset(deviceType, isDark)
-
-        isDarkCached = isDark
-        deviceTypeCached = deviceType
-        presetApplied = true
-    }
-
-    private fun applyPreset(deviceType: DeviceType, isDark: Boolean) {
-        val preset = BgEffectConfig.get(deviceType, isDark, isOs3)
+    /**
+     * 应用主题预设
+     *
+     * 接收调用方已选定的 [BgEffectConfig.Config]，不按设备类型或深色模式重新选择：
+     * 颜色与点位参数必须来自同一个预设，否则同一帧内会混用两套主题
+     */
+    fun updatePresetIfNeeded(preset: BgEffectConfig.Config) {
+        if (cachedPreset === preset) return
 
         runtimeShader.setFloatUniform("uPoints", preset.points)
         runtimeShader.setFloatUniform("uLightOffset", preset.lightOffset)
         runtimeShader.setFloatUniform("uSaturateOffset", preset.saturateOffset)
+
+        cachedPreset = preset
     }
 
     private fun updateBound(

@@ -19,8 +19,24 @@ object ProviderWorkers {
     }
 
     @JvmStatic fun track(provider: LyriconProvider) {
-        jobs.add(checkNotNull(scope(provider, "coroutineScope").coroutineContext[Job]))
-        jobs.add(checkNotNull(scope(provider.service, "callbackScope").coroutineContext[Job]))
+        for (job in listOf(checkNotNull(scope(provider, "coroutineScope").coroutineContext[Job]),
+            checkNotNull(scope(provider.service, "callbackScope").coroutineContext[Job]))) {
+            jobs.add(job)
+            job.invokeOnCompletion { jobs.remove(job) }
+        }
+    }
+
+    @JvmStatic fun release(provider: LyriconProvider) {
+        for (target in listOf(provider to "coroutineScope", provider.service to "callbackScope")) {
+            scope(target.first, target.second).coroutineContext[Job]?.cancel()
+        }
+        for (name in listOf("providerBinder", "localProviderService")) {
+            val field = provider.javaClass.getDeclaredField(name).apply { isAccessible = true }
+            CallbackEndpoints.forget(field.get(provider) as android.os.Binder)
+        }
+        val service = provider.service
+        val deathField = service.javaClass.getDeclaredField("deathRecipient").apply { isAccessible = true }
+        CallbackEndpoints.unlinkRecorded(deathField.get(service) as android.os.IBinder.DeathRecipient)
     }
 
     @JvmStatic fun unregisterBootReceiver(context: Context?) {

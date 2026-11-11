@@ -21,44 +21,40 @@ package com.hchen.superlyric;
 import static com.hchen.hooktool.ModuleConfig.LOG_D;
 
 import android.content.Context;
-import android.content.pm.ApplicationInfo;
-import android.app.AppComponentFactory;
-import android.os.Bundle;
-import com.hchen.superlyric.core.SuperLyricProxy;
-import com.hchen.superlyric.lyricon.LyriconBridge;
-import com.hchen.superlyric.publisher.UnifiedLyricProvider;
-import com.hchen.superlyric.reload.ReloadResources;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.hchen.dexkitcache.DexkitCache;
 import com.hchen.hooktool.AbsModule;
 import com.hchen.hooktool.ModuleConfig;
 import com.hchen.hooktool.ModuleData;
 import com.hchen.hooktool.ReloadModuleEntrance;
+import com.hchen.superlyric.reload.ReloadResources;
+import com.hchen.superlyric.provider.base.MusicProvider;
+import com.hchen.superlyric.core.SuperLyricSystemService;
+import com.hchen.superlyric.lyricon.LyriconBridge;
+import android.os.Bundle;
+import android.content.pm.ApplicationInfo;
+import android.app.AppComponentFactory;
+import java.util.HashMap;
+import java.util.Map;
 import com.hchen.hooktool.log.AndroidLog;
 import com.hchen.hooktool.utils.PrefsTool;
 import com.hchen.processor.HookMaps;
+import com.hchen.superlyric.anchors.DexKitRuntime;
 import com.hchen.superlyric.data.LocalConfig;
+import com.hchen.superlyric.data.PrefsKey;
 import com.hchen.superlyric.utils.LyricCacheStore;
 
-import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * SuperLyric 核心 Hook 入口。
- * <p>
- * 基于全新统一架构，直接按目标包名加载对应的 UnifiedLyricProvider 或系统代理，
- * 彻底消除 offline / online 路径割裂。
- *
- * @author 焕晨HChen
+ * 按目标包名加载 @HookThis 登记的模块。
  */
 public final class HookEntrance extends ReloadModuleEntrance {
     private static final String TAG = "SuperLyric";
@@ -66,13 +62,15 @@ public final class HookEntrance extends ReloadModuleEntrance {
     @Override
     public void initModuleConfig() {
         com.hchen.superlyric.reload.CallbackEndpoints.install(ModuleData.getWrapper());
+        com.hchen.superlyric.reload.EndpointDiscovery.install(ModuleData.getWrapper());
         ModuleConfig.setLogTag(TAG);
-        ModuleConfig.setPrefsName("super_lyric_prefs");
+        ModuleConfig.setPrefsName(PrefsKey.PREFS_NAME);
         ModuleConfig.setLogLevel(BuildConfig.DEBUG ? LOG_D : LocalConfig.getLogLevelForXposed());
         ModuleConfig.setShowHookSuccessLog(BuildConfig.DEBUG || LocalConfig.getLogLevelForXposed() == LOG_D);
         ModuleConfig.setLogExpandPaths(
             "com.hchen.superlyric.publisher",
             "com.hchen.superlyric.provider",
+            "com.hchen.superlyric.anchors",
             "com.hchen.superlyric.core"
         );
         ModuleConfig.setLogExpandIgnoreClassNames(
@@ -91,13 +89,13 @@ public final class HookEntrance extends ReloadModuleEntrance {
         };
     }
 
-    private final HashMap<String, List<AbsModule>> modules = new HashMap<>();
     private final HashMap<String, PackageReadyParam> readyPackages = new HashMap<>();
     private ClassLoader systemLoader;
-    private final HashMap<String, ClassLoader> moduleClassLoaders = new HashMap<>();
+    private final ConcurrentHashMap<String, List<AbsModule>> modules = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ClassLoader> moduleClassLoaders = new ConcurrentHashMap<>();
     private final ExecutorService cacheMigrationExecutor = Executors.newSingleThreadExecutor();
     @Nullable
-    private Context lastApplicationContext;
+    private volatile Context lastApplicationContext;
 
     @Override
     public void handlePackageReady(@NonNull PackageReadyParam param) {
@@ -108,21 +106,21 @@ public final class HookEntrance extends ReloadModuleEntrance {
 
         if (HookMaps.ON_PACKAGE_LOADED.containsKey(param.getPackageName())) {
             try {
-                int version = PrefsTool.prefs().getInt("super_lyric_dexkit_cache_version", 0);
+                int version = PrefsTool.prefs().getInt(PrefsKey.DEXKIT_CACHE_VERSION, 0);
 
                 ModuleData.setClassLoader(param.getClassLoader());
-                DexkitCache.init(
-                    "superlyric",
-                    param.getClassLoader(),
-                    param.getApplicationInfo().sourceDir,
-                    param.getApplicationInfo().dataDir,
-                    version
-                );
+                DexKitRuntime.initialize(param, version);
 
                 ClassLoader previousLoader = moduleClassLoaders.get(param.getPackageName());
                 if (modules.containsKey(param.getPackageName()) && previousLoader == param.getClassLoader()) {
                     for (AbsModule module : Objects.requireNonNull(modules.get(param.getPackageName()))) {
-                        module.handlePackageReady(param);
+                        try {
+                            module.handlePackageReady(param);
+                        } catch (Throwable t) {
+                            // 单个模块失败不能中断其余模块。
+                            AndroidLog.logE(TAG, "Module " + module.getClass().getName()
+                                + " failed during re-registration; skipping it", t);
+                        }
                     }
                     return;
                 }
@@ -133,24 +131,19 @@ public final class HookEntrance extends ReloadModuleEntrance {
 
                 List<AbsModule> packageModules = new ArrayList<>();
                 for (String path : Objects.requireNonNull(HookMaps.ON_PACKAGE_LOADED.get(param.getPackageName()))) {
+                    AbsModule module = instantiateModule(path);
+                    if (module == null) continue;
                     try {
-                        AbsModule module = (AbsModule) HookEntrance.class.getClassLoader()
-                            .loadClass(path)
-                            .getDeclaredConstructor()
-                            .newInstance();
-
                         module.handlePackageReady(param);
                         packageModules.add(module);
-                    } catch (IllegalAccessException | InstantiationException |
-                             InvocationTargetException | NoSuchMethodException |
-                             ClassNotFoundException e) {
-                        throw new RuntimeException(e);
+                    } catch (Throwable t) {
+                        AndroidLog.logE(TAG, "Module " + path + " failed during package ready; skipping it", t);
                     }
                 }
                 modules.put(param.getPackageName(), packageModules);
                 moduleClassLoaders.put(param.getPackageName(), param.getClassLoader());
             } finally {
-                DexkitCache.close();
+                DexKitRuntime.close();
             }
         }
     }
@@ -166,7 +159,12 @@ public final class HookEntrance extends ReloadModuleEntrance {
         List<AbsModule> packageModules = modules.get(context.getPackageName());
         if (packageModules != null) {
             for (AbsModule module : packageModules) {
-                module.handleApplicationCreated(context);
+                try {
+                    module.handleApplicationCreated(context);
+                } catch (Throwable t) {
+                    AndroidLog.logE(TAG, "Module " + module.getClass().getName()
+                        + " failed during application created; skipping it", t);
+                }
             }
         }
         lastApplicationContext = context;
@@ -174,7 +172,7 @@ public final class HookEntrance extends ReloadModuleEntrance {
 
     private void clearLyricCacheOnFormatUpgrade(@NonNull Context context) {
         try {
-            int lastCleared = PrefsTool.prefs(context).getInt("super_lyric_cache_format", 0);
+            int lastCleared = PrefsTool.prefs(context).getInt(PrefsKey.CACHE_FORMAT, 0);
             int current = LyricCacheStore.cacheVersion();
             if (lastCleared == current) return;
             if (!LyricCacheStore.clearOnlineProviderCaches(context)) {
@@ -183,7 +181,7 @@ public final class HookEntrance extends ReloadModuleEntrance {
             }
             boolean committed = PrefsTool.prefs(context)
                 .edit()
-                .putInt("super_lyric_cache_format", current)
+                .putInt(PrefsKey.CACHE_FORMAT, current)
                 .commit();
             if (!committed) {
                 AndroidLog.logE(TAG, "Failed to persist lyric cache format migration; retry on next startup");
@@ -197,24 +195,33 @@ public final class HookEntrance extends ReloadModuleEntrance {
 
     @Override
     public void handleSystemServerStarting(@NonNull SystemServerStartingParam param) {
-        super.handleSystemServerStarting(param);
         systemLoader = param.getClassLoader();
+        super.handleSystemServerStarting(param);
 
         ModuleData.setClassLoader(param.getClassLoader());
-        for (List<String> value : HookMaps.ON_SYSTEM_STARTING.values()) {
-            for (String path : value) {
-                try {
-                    AbsModule module = (AbsModule) HookEntrance.class.getClassLoader()
-                        .loadClass(path)
-                        .getDeclaredConstructor()
-                        .newInstance();
-                    module.handleSystemServerStarting(param);
-                } catch (IllegalAccessException | InstantiationException |
-                         InvocationTargetException | NoSuchMethodException |
-                         ClassNotFoundException e) {
-                    throw new RuntimeException(e);
-                }
+        List<String> systemModules = HookMaps.ON_SYSTEM_STARTING.get("system");
+        if (systemModules == null) return;
+        for (String path : systemModules) {
+            AbsModule module = instantiateModule(path);
+            if (module == null) continue;
+            try {
+                module.handleSystemServerStarting(param);
+            } catch (Throwable t) {
+                AndroidLog.logE(TAG, "Module " + path + " failed during system start; skipping it", t);
             }
+        }
+    }
+
+    @Nullable
+    private static AbsModule instantiateModule(String path) {
+        try {
+            return (AbsModule) HookEntrance.class.getClassLoader()
+                .loadClass(path)
+                .getDeclaredConstructor()
+                .newInstance();
+        } catch (Throwable t) {
+            AndroidLog.logE(TAG, "Failed to load module " + path + "; skipping it", t);
+            return null;
         }
     }
 
@@ -222,7 +229,6 @@ public final class HookEntrance extends ReloadModuleEntrance {
     public boolean isHotReloadingAllowed(@NonNull String packageName) {
         return !ReloadResources.retiring && android.os.Looper.myLooper() != android.os.Looper.getMainLooper();
     }
-
     @Override
     public Map<String, Object> handleHotReloading(@Nullable Bundle extras) {
         ReloadResources.retiring = true;
@@ -243,21 +249,25 @@ public final class HookEntrance extends ReloadModuleEntrance {
         if (modules.containsKey("com.android.systemui")) LyriconBridge.close();
         Map<String, Object> providerStates = new HashMap<>();
         for (Map.Entry<String, List<AbsModule>> entry : modules.entrySet()) for (AbsModule module : entry.getValue()) {
-            if (module instanceof UnifiedLyricProvider provider) {
+            if (module instanceof MusicProvider provider) {
                 providerStates.put(entry.getKey() + "/" + module.getClass().getName(), provider.saveReloadState());
-                provider.close();
+                provider.closeForReload();
             }
         }
         saved.put("providerStates", providerStates);
-        saved.put("systemService", SuperLyricProxy.retireAndSave());
+        saved.put("systemService", SuperLyricSystemService.retireAndSave());
         ReloadResources.stop(cacheMigrationExecutor);
         modules.clear();
         moduleClassLoaders.clear();
         readyPackages.clear();
         lastApplicationContext = null;
-        com.hchen.superlyric.reload.CallbackEndpoints.retire();
+        com.hchen.superlyric.provider.apple.AppleAnchors.closeForReload();
+        com.hchen.superlyric.network.HttpClients.closeForReload();
+        ReloadResources.retireExecutors();
+        saved.put("callbackEndpoints", com.hchen.superlyric.reload.CallbackEndpoints.retire());
         ReloadResources.onMain(() -> null);
         com.hchen.superlyric.reload.ProviderWorkers.retire();
+        com.hchen.superlyric.reload.SdkWorkers.close();
         com.hchen.superlyric.reload.LibraryWorkers.close();
         AndroidLog.logI(TAG, "Hot reload: old generation retired");
         return saved;
@@ -265,7 +275,7 @@ public final class HookEntrance extends ReloadModuleEntrance {
 
     @Override
     public void handleHotReloadingFailed(@NonNull Throwable error) {
-        SuperLyricProxy.failReload();
+        SuperLyricSystemService.failReload();
         AndroidLog.logE(TAG, "Hot reload retirement failed; process restart required", error);
     }
 
@@ -274,9 +284,10 @@ public final class HookEntrance extends ReloadModuleEntrance {
     public void handleHotReloaded(@NonNull HotReloadedParam param, @NonNull ClassLoader loader) {
         Map<String, Object> saved = (Map<String, Object>) param.getSavedInstanceState();
         if (saved == null) throw new IllegalStateException("Missing hot reload state");
+        com.hchen.superlyric.reload.CallbackEndpoints.restore((Map<String, Object>) saved.get("callbackEndpoints"));
         ClassLoader system = (ClassLoader) saved.get("systemLoader");
         if (system != null) {
-            SuperLyricProxy.prepareRestore((Map<String, Object>) saved.get("systemService"));
+            SuperLyricSystemService.prepareRestore((Map<String, Object>) saved.get("systemService"));
             handleSystemServerStarting(() -> system);
         }
         Map<String, Object> packages = (Map<String, Object>) saved.get("packages");
@@ -291,18 +302,23 @@ public final class HookEntrance extends ReloadModuleEntrance {
                 public AppComponentFactory getAppComponentFactory() { return (AppComponentFactory) item.get("factory"); }
             });
         });
+        Context context = (Context) saved.get("context");
+        if (context != null) {
+            ReloadResources.onMain(() -> { handleApplicationCreated(context); return null; });
+        }
         Map<String, Object> providerStates = (Map<String, Object>) saved.get("providerStates");
         if (providerStates != null) {
             for (Map.Entry<String, List<AbsModule>> entry : modules.entrySet()) for (AbsModule module : entry.getValue()) {
                 Object state = providerStates.get(entry.getKey() + "/" + module.getClass().getName());
-                if (module instanceof UnifiedLyricProvider provider && state instanceof Bundle bundle) provider.restoreReloadState(bundle);
-            }
-        }
-        Context context = (Context) saved.get("context");
-        if (context != null) {
-            ReloadResources.onMain(() -> { handleApplicationCreated(context); return null; });
-            for (List<AbsModule> value : modules.values()) for (AbsModule module : value) {
-                if (module instanceof UnifiedLyricProvider provider) provider.resumeAfterReload(context);
+                if (state == null) {
+                    String suffix = "." + module.getClass().getSimpleName();
+                    for (Map.Entry<String, Object> savedProvider : providerStates.entrySet()) {
+                        if (savedProvider.getKey().startsWith(entry.getKey() + "/") && savedProvider.getKey().endsWith(suffix)) {
+                            state = savedProvider.getValue(); break;
+                        }
+                    }
+                }
+                if (module instanceof MusicProvider provider && state instanceof Bundle bundle) provider.restoreReloadState(bundle);
             }
         }
         AndroidLog.logI(TAG, "Hot reload complete: " + BuildConfig.VERSION_NAME + " / " + param.getProcessName());

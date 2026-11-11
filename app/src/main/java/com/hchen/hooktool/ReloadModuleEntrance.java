@@ -375,7 +375,7 @@ public abstract class ReloadModuleEntrance extends XposedModule {
             // Keep the stable service dispatcher until the new generation atomically replaces
             // its API 102 hook ID. Other hooks are removed before normal initialization.
             for (HookHandle old : oldHandles) {
-                if (!"superlyric.service.endpoint".equals(old.getId())) old.unhook();
+                if ((old.getId() == null || !old.getId().startsWith("superlyric.service."))) old.unhook();
             }
 
             handleHotReloaded(param, classLoader);

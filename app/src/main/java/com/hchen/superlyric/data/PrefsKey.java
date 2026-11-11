@@ -21,9 +21,13 @@ package com.hchen.superlyric.data;
 /**
  * 本地配置项键名常量。
  *
- * @author 焕晨HChen
  */
 public final class PrefsKey {
+    public static final String PREFS_NAME = "super_lyric_prefs";
     public static final String LOG_LEVEL = "log_level";
-    public static final String NETWORK_LYRICS_MODE = "network_lyrics_mode";
+    public static final String DEXKIT_CACHE_VERSION = "super_lyric_dexkit_cache_version";
+    public static final String CACHE_FORMAT = "super_lyric_cache_format";
+
+    private PrefsKey() {
+    }
 }

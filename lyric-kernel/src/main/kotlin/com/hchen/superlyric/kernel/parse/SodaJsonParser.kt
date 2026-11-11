@@ -1,0 +1,300 @@
+/*
+ * This file is part of SuperLyric.
+ *
+ * SuperLyric is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Copyright (C) 2025-2026 HChenX
+ */
+package com.hchen.superlyric.kernel.parse
+
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
+import com.hchen.superlyric.kernel.merge.SidecarChannel
+import com.hchen.superlyric.kernel.merge.TimeText
+import com.hchen.superlyric.kernel.merge.TranslationMerger
+import com.hchen.superlyric.kernel.model.LyricDoc
+import com.hchen.superlyric.kernel.model.LyricLine
+import com.hchen.superlyric.kernel.model.LyricWord
+import com.hchen.superlyric.kernel.text.LrcTimestamps
+import com.hchen.superlyric.kernel.text.LyricText
+
+/**
+ * 汽水音乐（Soda / Luna）与波点 JSON 分支的原生逐字歌词解析器
+ *
+ * 结构
+ * `sentences[]` 数组可能被包裹在多个层级下，逐层探测：
+ * `sentences` → `lyrics.sentences` → `audioWithLyricsOption.*`
+ * → `track_page.*` → `loaderData.*`。
+ */
+object SodaJsonParser {
+
+    private const val DEFAULT_SENTENCE_DURATION_MS = 2000L
+
+    /**
+     * 句数上限
+     *
+     * 守的是本层的分配与逐句处理：`sentences` 的规模决定 `ArrayList` 的预分配，
+     * 也决定下面这一轮要跑多少次解析。报文的 JSON 早已被上游物化成对象树，这个上限拦不住
+     * 那一次分配：要防它得在读取侧设界（`ResponseBodies.readTextBounded`）。
+     *
+     * 正常曲目远少于此值，超限只可能是畸形载荷；超过上限的合法载荷会被
+     * 静默截断（内核没有日志出口）
+     */
+    private const val MAX_SENTENCES = 4096
+
+    /**
+     * 判定文本是否为该 JSON 形态
+     */
+    fun canParse(text: String?): Boolean {
+        if (text.isNullOrEmpty()) return false
+        val trimmed = text.trimStart()
+        return trimmed.startsWith("{") && trimmed.contains("\"sentences\"")
+    }
+
+    /**
+     * 解析 JSON 歌词正文
+     *
+     * @return 解析结果；无有效歌词行时返回 null
+     */
+    fun parse(text: String?): LyricDoc? {
+        if (!canParse(text)) return null
+        val body = text ?: return null
+        // Gson 的 JsonParser 会在进入 findSentencesContainer 之前递归物化整棵树；
+        // 深度上限只保护自家搜索，保护不了建树阶段的 StackOverflowError。
+        if (exceedsMaxDepth(body)) return null
+
+        // 只接解析失败这一类（JSON 语法错、形状不是对象），不接 Error：
+        // 把 StackOverflowError / OutOfMemoryError 一起吞成 null，等于把"读不出来"
+        // 伪装成"解析结果为空"，而下层把它当终态结论用
+        val root = try {
+            JsonParser.parseString(body).asJsonObject
+        } catch (e: RuntimeException) {
+            null
+        } ?: return null
+        // 主歌词与译文必须取自同一个容器：载荷可能把二者一起放在
+        // `lyrics` / `track_page` 等嵌套层下（见类注释）。只在根节点找译文，
+        // 嵌套形态的译文会整段丢失，且无任何痕迹
+        val container = findSentencesContainer(root, 0) ?: return null
+        val sentences = container.array("sentences") ?: return null
+        if (sentences.size() == 0) return null
+
+        val limit = sentences.size().coerceAtMost(MAX_SENTENCES)
+        val lines = ArrayList<LyricLine>(limit)
+        for (index in 0 until limit) {
+            val sentence = sentences.get(index) as? JsonObject ?: continue
+            val line = parseSentence(sentence) ?: continue
+            lines += line
+        }
+        if (lines.isEmpty()) return null
+        lines.sortBy { it.startMs }
+
+        // 译文优先与 `sentences` 同容器；该层没有时再回落根节点。两条路都查，
+        // 才能既不丢"二者同在嵌套层"的译文、也不丢"主歌词嵌套但译文在根"的排布
+        val translations = parseTranslations(container)
+            .ifEmpty { if (container === root) emptyList() else parseTranslations(root) }
+        val doc = LyricDoc(lines = lines)
+        return if (translations.isEmpty()) {
+            doc
+        } else {
+            TranslationMerger.attach(doc, translations, SidecarChannel.TRANSLATION)
+        }
+    }
+
+    private fun parseSentence(sentence: JsonObject): LyricLine? {
+        val startMs = sentence.long("startMs", "start_ms") ?: 0L
+        val rawEndMs = sentence.long("endMs", "end_ms") ?: 0L
+        val endMs = if (rawEndMs > startMs) rawEndMs else startMs + DEFAULT_SENTENCE_DURATION_MS
+
+        val wordsArray = sentence.array("words")
+        val words = ArrayList<LyricWord>()
+        val textBuilder = StringBuilder()
+
+        if (wordsArray != null) {
+            for (element in wordsArray) {
+                val wordObject = element as? JsonObject ?: continue
+                // 不可 trim：拉丁词元的尾随空格是文本的一部分，trim 会把 "Hello world" 变成 "Helloworld"
+                val wordText = LyricText.cleanInvisibleChars(wordObject.string("text"))
+                if (wordText.isBlank()) continue
+
+                val rawWordStart = wordObject.long("startMs", "start_ms")
+                val rawWordEnd = wordObject.long("endMs", "end_ms")
+
+                val wordStart: Long
+                val wordEnd: Long
+                if (rawWordStart == null) {
+                    wordStart = startMs
+                    wordEnd = startMs + LyricText.fallbackWordDuration(wordText)
+                } else {
+                    // 仅当词起始早于所属句起始时，才认定为行内相对偏移
+                    val isRelative = rawWordStart < startMs
+                    wordStart = if (isRelative) startMs + rawWordStart else rawWordStart
+                    val resolvedEnd = when {
+                        rawWordEnd == null -> wordStart + LyricText.fallbackWordDuration(wordText)
+                        isRelative -> startMs + rawWordEnd
+                        else -> rawWordEnd
+                    }
+                    wordEnd = if (resolvedEnd > wordStart) resolvedEnd
+                    else wordStart + LyricText.fallbackWordDuration(wordText)
+                }
+
+                words += LyricWord(wordText, wordStart, wordEnd)
+                textBuilder.append(wordText)
+            }
+        }
+
+        val text = if (words.isNotEmpty()) {
+            textBuilder.toString()
+        } else {
+            LyricText.cleanInvisibleChars(sentence.string("text")).trim()
+        }
+        if (text.isEmpty()) return null
+
+        return LyricLine(
+            startMs = startMs,
+            endMs = endMs,
+            text = text,
+            words = words,
+        )
+    }
+
+    /**
+     * 解析 `translations.cn`
+     *
+     * 该字段有两种形态，均归一为 [TimeText]：
+     * - 与 `sentences` 平行的对象数组，逐项读取 `startMs` 与 `text`
+     * - LRC 形态字符串（`[mm:ss.xx]译文`）
+     *
+     * 形态无法识别时返回空列表：此时只丢失译文，不影响主歌词
+     */
+    private fun parseTranslations(root: JsonObject): List<TimeText> {
+        val translations = root.get("translations") as? JsonObject ?: return emptyList()
+        val cn = translations.get("cn") ?: return emptyList()
+
+        if (cn.isJsonArray) {
+            val entries = ArrayList<TimeText>()
+            for (element in cn.asJsonArray) {
+                val item = element as? JsonObject ?: continue
+                val startMs = item.long("startMs", "start_ms") ?: continue
+                val text = LyricText.cleanInvisibleChars(item.string("text")).trim()
+                if (text.isEmpty()) continue
+                entries += TimeText(startMs, text)
+            }
+            return entries
+        }
+
+        if (cn.isJsonPrimitive) {
+            return parseLrcLike(cn.asString)
+        }
+        return emptyList()
+    }
+
+    private val LRC_LINE = Regex("""^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?]\s*(.*)$""")
+
+    private fun parseLrcLike(raw: String): List<TimeText> {
+        val entries = ArrayList<TimeText>()
+        for (line in raw.lineSequence()) {
+            val match = LRC_LINE.find(line.trim()) ?: continue
+            val text = LyricText.cleanInvisibleChars(match.groupValues[4]).trim()
+            if (text.isEmpty()) continue
+
+            entries += TimeText(
+                LrcTimestamps.timestampOf(
+                    match.groupValues[1], match.groupValues[2], match.groupValues[3]
+                ),
+                text,
+            )
+        }
+        return entries
+    }
+
+    /**
+     * 容器嵌套深度上限
+     *
+     * 递归只沿固定几个键下降，但同一个键可以层层套（`{"lyrics":{"lyrics":{…}}}`），
+     * 因此深度并不天然有界。常见载荷最多两层，超限即判形态不符
+     */
+    private const val MAX_CONTAINER_DEPTH = 4
+
+    /** Gson 建树前的嵌套深度上限；正常歌词 JSON 远小于此值 */
+    private const val MAX_JSON_DEPTH = 64
+
+    private fun exceedsMaxDepth(text: String): Boolean {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (ch in text) {
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    ch == '\\' -> escaped = true
+                    ch == '"' -> inString = false
+                }
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '{', '[' -> {
+                    depth++
+                    if (depth > MAX_JSON_DEPTH) return true
+                }
+
+                '}', ']' -> if (depth > 0) depth--
+            }
+        }
+        return false
+    }
+
+    /**
+     * 定位持有 `sentences` 的那个对象
+     *
+     * 返回容器本身而非数组：主歌词与译文常并列放在同一层，调用方需要从同一个容器里
+     * 分别取 `sentences` 与 `translations`，否则嵌套形态的译文会整段丢失
+     */
+    private fun findSentencesContainer(root: JsonObject, depth: Int): JsonObject? {
+        if (root.get("sentences") is JsonArray) return root
+        if (depth >= MAX_CONTAINER_DEPTH) return null
+        for (key in NESTED_CONTAINERS) {
+            val nested = root.get(key) as? JsonObject ?: continue
+            findSentencesContainer(nested, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    private val NESTED_CONTAINERS = listOf(
+        "lyrics",
+        "audioWithLyricsOption",
+        "track_page",
+        "loaderData",
+    )
+
+    private fun JsonObject.long(vararg keys: String): Long? {
+        for (key in keys) {
+            val element: JsonElement = get(key) ?: continue
+            if (!element.isJsonPrimitive) continue
+            val value = runCatching { element.asLong }.getOrNull() ?: continue
+            return value
+        }
+        return null
+    }
+
+    private fun JsonObject.string(key: String): String {
+        val element: JsonElement = get(key) ?: return ""
+        if (!element.isJsonPrimitive) return ""
+        return runCatching { element.asString }.getOrDefault("")
+    }
+
+    private fun JsonObject.array(key: String): JsonArray? = get(key) as? JsonArray
+}

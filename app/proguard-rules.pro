@@ -1,12 +1,15 @@
-# 保留源文件与行号信息，供 Xposed 日志与异常崩溃栈排查
+# 保留源文件名与行号，供日志和异常栈定位
 -keepattributes SourceFile,LineNumberTable
 
-# Xposed 模块入口：由 LSPosed 框架通过 java_init.list 反射调用无参构造函数加载
+# Gson 通过字段签名解析 List<T> 的元素类型；剥离 Signature 会把元素读成 LinkedTreeMap
+-keepattributes Signature
+
+# Xposed 模块入口；LSPosed 通过 java_init.list 反射加载
 -keep class com.hchen.superlyric.HookEntrance {
     <init>();
 }
 
-# 动态加载的模块与 Provider：HookEntrance 通过 HookMaps 映射表反射类名并调用无参构造实例化
+# 动态加载的模块与 Provider；HookEntrance 按 HookMaps 反射实例化
 -keep class * extends com.hchen.hooktool.ModuleEntrance {
     <init>();
 }
@@ -14,35 +17,35 @@
     <init>();
 }
 
-# 开放 API 与跨进程通信：AIDL 接口、Binder Stub 与 Parcelable 序列化模型
+# 4.0 API、Binder 与 Parcelable 模型
 -keep class com.hchen.superlyricapi.** { *; }
 
-# Dexkit 磁盘缓存数据类
+# DexKit 磁盘缓存数据类
 -keep class com.hchen.dexkitcache.DexkitCache$MemberData { *; }
 
-# Spotify 在线歌词接口 DTO 仅由 Gson 反射填充：保留字段以防 R8 判定未写入导致解析失效
--keepclassmembers class com.hchen.superlyric.provider.spotify.SpotifyLyricAnalysis$Json* {
+# Spotify 歌词 DTO 由 Gson 反射填充；保留字段防止 R8 移除
+-keepclassmembers class com.hchen.superlyric.kernel.parse.SpotifyLyricParser$Json* {
     <init>();
     <fields>;
 }
 
-# 隐藏 API / 仅编译依赖警告抑制
+# 隐藏 API 与仅编译依赖的警告抑制
 -dontwarn android.os.ServiceManager
 -dontwarn de.robv.android.xposed.XposedHelpers
-# Reflection hooks keep SDK callback Binders neutral across module generations.
+-keep class * extends com.hchen.hooktool.ReloadModuleEntrance { *; }
+-keep class com.hchen.superlyric.reload.** { *; }
 -keep class io.github.proify.lyricon.provider.IProviderBinder$Stub { *; }
 -keep class io.github.proify.lyricon.provider.IProviderService$Stub { *; }
--keep class com.hchen.superlyric.reload.** { *; }
-
-# Owned Okio watchdog retirement uses its pinned idle queue fields, never shared host instances.
+-keep class io.github.proify.lyricon.provider.CentralServiceReceiver { *; }
+-keep class io.github.proify.lyricon.provider.impl.ProviderV27Impl { *; }
+-keep class io.github.proify.lyricon.provider.impl.RemoteServiceProxy { *; }
+-keep class com.hchen.superlyricapi.internal.Background { *; }
+-keep class com.hchen.superlyricapi.internal.BinderHub { *; }
+-keep class com.hchen.superlyric.kernel.identity.** { *; }
+-keep class com.hchen.superlyric.kernel.model.** { *; }
+-keep class com.hchen.superlyric.kernel.catalog.** { *; }
 -keep class okio.AsyncTimeout { *; }
 -keep class okio.AsyncTimeout$* { *; }
 -keep class okio.PriorityQueue { *; }
 
-# SDK 0.1.70 reload cleanup uses these pinned internal lifecycle fields.
--keep class io.github.proify.lyricon.provider.CentralServiceReceiver { *; }
--keep class io.github.proify.lyricon.provider.impl.ProviderV27Impl { *; }
--keep class io.github.proify.lyricon.provider.impl.RemoteServiceProxy { *; }
-
-# Preserve the same entry contract as the original HookTool entrance after changing its base.
--keep class * extends com.hchen.hooktool.ReloadModuleEntrance { *; }
+-keepattributes Signature

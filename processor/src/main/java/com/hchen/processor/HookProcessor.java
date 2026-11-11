@@ -30,9 +30,11 @@ import com.squareup.javapoet.TypeSpec;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Predicate;
 
 import javax.annotation.processing.AbstractProcessor;
@@ -44,34 +46,57 @@ import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
+import javax.tools.Diagnostic;
 
 /**
- * 注解处理
+ * 读取 {@code @HookThis} 并生成 {@code HookMaps}
  *
- * @author 焕晨HChen
+ * <p>按 {@code targetPackage} 分组，生成 {@code ON_PACKAGE_LOADED} 与
+ * {@code ON_SYSTEM_STARTING} 两个常量表。
+ *
  */
 @AutoService(Processor.class)
 @SupportedAnnotationTypes("com.hchen.processor.HookThis")
 @SupportedSourceVersion(SourceVersion.RELEASE_21)
 public class HookProcessor extends AbstractProcessor {
-    private final Map<String, List<HookData>> maps = new HashMap<>();
+    private final Map<String, List<HookData>> maps = new TreeMap<>();
+    private final Set<String> seenTypes = new HashSet<>();
+
+    /**
+     * 是否已经生成过 {@code HookMaps}
+     *
+     * <p>注解处理器可能被调用多轮；{@code JavaFile.writeTo(filer)} 对同一个类名写第二次会抛
+     * {@code FilerException}，因此只写一次
+     */
+    private boolean generated;
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment env) {
         if (env.processingOver()) return true;
 
-        for (Element element : env.getElementsAnnotatedWith(HookThis.class)) {
+        Set<? extends Element> annotated = env.getElementsAnnotatedWith(HookThis.class);
+        for (Element element : annotated) {
             if (!(element instanceof TypeElement typeElement)) {
                 throw new RuntimeException("Element can't cast to TypeElement.");
             }
 
+            String typeName = typeElement.getQualifiedName().toString();
+            boolean newType = seenTypes.add(typeName);
+            if (generated && newType) {
+                // javac 不允许在最后一轮写新的 class 文件，首轮之后出现的 @HookThis
+                // 无法再并入已有的 HookMaps；显式报错，不能静默漏掉 Provider
+                processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "@HookThis element appeared after HookMaps was generated: " + typeName
+                );
+            }
             HookThis hook = element.getAnnotation(HookThis.class);
             if (hook != null) {
                 maps
                     .computeIfAbsent(hook.targetPackage(), k -> new ArrayList<>())
                     .add(
                         new HookData(
-                            typeElement.getQualifiedName().toString(),
+                            typeName,
                             hook.onPackageLoaded(),
                             hook.onSystemStarting()
                         )
@@ -79,9 +104,10 @@ public class HookProcessor extends AbstractProcessor {
             }
         }
 
-        if (!env.getElementsAnnotatedWith(HookThis.class).isEmpty()) {
+        if (!generated && !annotated.isEmpty()) {
             try {
                 generateHookData();
+                generated = true;
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
@@ -123,8 +149,10 @@ public class HookProcessor extends AbstractProcessor {
             .writeTo(processingEnv.getFiler());
     }
 
-    /*
+    /**
      * 生成 static final Map 常量
+     *
+     * <p>按包名聚合类路径，过滤条件不成立的条目不会出现在结果中。
      */
     private FieldSpec generateStaticMap(
         String fieldName,
@@ -137,7 +165,6 @@ public class HookProcessor extends AbstractProcessor {
 
         List<String> entries = new ArrayList<>();
         dataMap.forEach((pkg, data) -> {
-            @SuppressWarnings("NewApi")
             List<String> values = data.stream()
                 .filter(filter)
                 .map(d -> d.classPath)

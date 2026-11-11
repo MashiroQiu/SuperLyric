@@ -19,6 +19,7 @@
 package com.hchen.superlyric.ui.screen
 
 import android.annotation.SuppressLint
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -43,6 +44,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,18 +63,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.edit
 import com.hchen.hooktool.data.AppData
-import com.hchen.hooktool.utils.PrefsTool
 import com.hchen.superlyric.R
-import com.hchen.superlyric.data.PrefsKey
 import com.hchen.superlyric.data.SupportApps
 import com.hchen.superlyric.data.apps.ApiAppData
-import com.hchen.superlyric.ui.Application
 import com.hchen.superlyric.ui.data.LocalViewModel
 import com.hchen.superlyric.ui.effect.BlurredBar
 import com.hchen.superlyric.ui.effect.rememberBlurBackdrop
+import com.hchen.superlyric.ui.screen.settings.HomeSettingsController
+import com.hchen.superlyric.ui.screen.settings.HomeSettingsState
 import com.hchen.superlyric.ui.viewmodel.MainUiAction
+import com.hchen.superlyric.utils.LauncherIconController
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.DropdownEntry
@@ -99,14 +100,15 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
+import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.window.WindowDialog
 
 @Composable
 @SuppressLint("LocalContextGetResourceValueCall")
 fun HomeLayout(
     paddingValues: PaddingValues,
-    isWideScreen: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isWideScreen: Boolean = false
 ) {
     val context = LocalContext.current
     val viewModel = LocalViewModel.current
@@ -132,7 +134,11 @@ fun HomeLayout(
         )
     }
 
-    val settingsEntries = remember(logLevel) {
+    var launcherHidden by remember { mutableStateOf(LauncherIconController.isHidden(context)) }
+    val settingsState = HomeSettingsState(logLevel, launcherHidden)
+    val settingsScope = rememberCoroutineScope()
+
+    val settingsEntries = remember(logLevel, launcherHidden) {
         listOf(
             DropdownEntry(
                 items = listOf(
@@ -140,13 +146,34 @@ fun HomeLayout(
                         text = context.getString(R.string.clear_dexkit_cache),
                         selected = false,
                         onClick = {
-                            val remotePrefs = Application.getRemotePreferences()
-                            if (remotePrefs != null) {
-                                var version = remotePrefs.getInt("super_lyric_dexkit_cache_version", 0)
-                                remotePrefs.edit { putInt("super_lyric_dexkit_cache_version", ++version) }
-                                Toast.makeText(context, context.getString(R.string.cleared), Toast.LENGTH_SHORT).show()
+                            settingsScope.launch {
+                                val ok = HomeSettingsController.clearCache()
+                                Toast.makeText(
+                                    context,
+                                    context.getString(
+                                        if (ok) R.string.cleared else R.string.clear_failed
+                                    ),
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    ),
+                    DropdownItem(
+                        text = context.getString(
+                            HomeSettingsController.launcherLabelRes(settingsState.launcherHidden)
+                        ),
+                        selected = false,
+                        onClick = {
+                            val next = !launcherHidden
+                            if (HomeSettingsController.setLauncherHidden(context, next)) {
+                                // setLauncherHidden 已在隐藏时结束全部 task，这里不再重复 finish。
+                                launcherHidden = next
                             } else {
-                                Toast.makeText(context, context.getString(R.string.clear_failed), Toast.LENGTH_SHORT).show()
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.icon_toggle_failed),
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
                     ),
@@ -158,7 +185,7 @@ fun HomeLayout(
                                 selected = logLevel == index,
                                 onClick = {
                                     viewModel.handleAction(MainUiAction.UpdateLogLevel(index))
-                                    PrefsTool.prefs(context).edit { putInt(PrefsKey.LOG_LEVEL, index) }
+                                    HomeSettingsController.setLogLevel(context, index)
                                 }
                             )
                         }
@@ -297,9 +324,9 @@ fun HomeLayout(
 }
 
 /**
- * Modern pill badge indicating whether the app is supported via Hook or native API.
- * Uses high-contrast, theme-adaptive tones (fresh primary for API, vivid violet for Hook)
- * to avoid dull and inactive-looking gray badges.
+ * 标识应用来源的标签：API 或 Hook
+ *
+ * 颜色随主题与深色模式变化，两种来源使用不同色相以便区分
  */
 @Composable
 private fun AppTypeBadge(
@@ -343,9 +370,8 @@ private fun AppTypeBadge(
 private fun AppItemComponent(
     appData: AppData,
     isApi: Boolean,
-    enabled: Boolean = true,
-    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
 ) {
     Card(
         modifier = modifier
@@ -353,7 +379,6 @@ private fun AppItemComponent(
             .padding(bottom = 12.dp)
     ) {
         ArrowPreference(
-            enabled = enabled,
             title = appData.label.ifEmpty { appData.packageName.orEmpty() },
             summary = appData.packageName.orEmpty(),
             endActions = {
@@ -529,15 +554,18 @@ private fun AppDetailsDialog(
             TextButton(
                 text = stringResource(android.R.string.ok),
                 onClick = {
+                    val pkgName = appData.packageName.orEmpty()
                     try {
-                        val pkgName = appData.packageName.orEmpty()
                         val intent = context.packageManager.getLaunchIntentForPackage(pkgName)
                         if (intent != null) {
                             context.startActivity(intent)
                         } else {
                             Toast.makeText(context, R.string.no_activity, Toast.LENGTH_SHORT).show()
                         }
-                    } catch (_: Throwable) {
+                    } catch (e: Throwable) {
+                        // 原因必须留痕：getLaunchIntentForPackage / startActivity 抛错的
+                        // 原因（包不存在、权限、Activity 未导出）各不相同，Toast 无法区分
+                        Log.w("HomeLayout", "Failed to launch app $pkgName", e)
                         Toast.makeText(context, R.string.no_activity, Toast.LENGTH_SHORT).show()
                     }
 

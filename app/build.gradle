@@ -14,7 +14,7 @@ android {
     def hasReleaseSigning = signingPropertyNames.every { properties.getProperty(it)?.trim() }
     if (!hasReleaseSigning) {
         logger.warn('Release signing credentials are incomplete or local.properties is missing; release APKs will be built unsigned. ' +
-            'Define keyStoreFile, keyStorePassword, keyAlias, and keyAliasPassword to sign release builds.')
+                'Define keyStoreFile, keyStorePassword, keyAlias, and keyAliasPassword to sign release builds.')
     }
 
     signingConfigs {
@@ -42,8 +42,8 @@ android {
         minSdk 30
         targetSdk 37
         // noinspection HighAppVersionCode
-        versionCode 2026101005
-        versionName "4.0-api102-hotreload-sessionfix2"
+        versionCode 2026111101
+        versionName "4.1-api102-lyricon"
 
         ndk {
             // noinspection ChromeOsAbiSupport
@@ -80,20 +80,20 @@ android {
     }
 
     lint {
-        abortOnError false
-        checkReleaseBuilds false
+        abortOnError true
+        checkReleaseBuilds true
+        warningsAsErrors true
+        // 资源位置与 AGP 更新提示不作为项目代码门禁：头像保持 densityless 以免改变渲染，
+        // AGP 升级属于独立版本变更。
+        disable += ['IconLocation', 'AndroidGradlePluginVersion']
     }
 
-    // packagingOptions {
-    //     resources {
-    //         excludes += "/META-INF/**"
-    //         excludes += "/kotlin/**"
-    //         excludes += "/*.txt"
-    //         excludes += "/*.bin"
-    //         excludes += "/*.json"
-    //         excludes += 'DebugProbesKt.bin'
-    //     }
-    // }
+    testOptions {
+        unitTests.all {
+            it.useJUnitPlatform()
+        }
+        unitTests.returnDefaultValues = true
+    }
 }
 
 androidComponents {
@@ -109,14 +109,13 @@ androidComponents {
 }
 
 dependencies {
-    testImplementation "junit:junit:4.13.2"
-    testImplementation "org.mockito:mockito-core:5.18.0"
-    testImplementation libs.api
     configurations.configureEach {
         resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
         resolutionStrategy.cacheDynamicVersionsFor 0, 'seconds'
     }
 
+    implementation("io.github.proify.lyricon:provider:0.1.70")
+    implementation libs.okhttp
     implementation libs.appcompat
     implementation libs.annotation
 
@@ -137,18 +136,21 @@ dependencies {
     compileOnly libs.api
     implementation libs.service
     implementation libs.hooktool
-    implementation libs.dexkit
-    implementation libs.dexkitcache
-    implementation libs.mmkv
-    implementation libs.gson
-    implementation libs.okhttp
-    implementation libs.okhttp.brotli
-    implementation(libs.superlyricapi) {
-        changing = true
-    }
-    implementation libs.lyricon.provider
+    implementation libs.superlyricapi
+    implementation libs.xxpermissions
+    implementation project(':lyric-kernel')
+    implementation project(':shared')
+    implementation project(':hook-anchors')
+    implementation project(':hooks-id')
+    implementation project(':lyric-hook')
+    implementation project(':lyric-network')
+    implementation project(':lyric-service')
 
-    compileOnly(project(':hidden-api'))
-    implementation project(':processor')
+    compileOnly project(':processor')
     annotationProcessor project(':processor')
+
+    testImplementation libs.api
+    testImplementation platform(libs.junit.bom)
+    testImplementation libs.junit.jupiter
+    testRuntimeOnly libs.junit.platform.launcher
 }

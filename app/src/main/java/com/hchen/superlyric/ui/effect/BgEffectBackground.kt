@@ -25,12 +25,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
@@ -38,6 +40,7 @@ import com.hchen.superlyric.ui.data.UIConstants
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
+import top.yukonga.miuix.kmp.blur.BlurBlendMode
 import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
@@ -89,7 +92,9 @@ fun BgEffectBackground(
 
             var targetStage = floor(colorStage.value) + 1f
             while (isActive) {
-                delay((preset.colorInterpPeriod * 500).toLong())
+                // `colorInterpPeriod` 是预设的周期刻度，由 MILLIS_PER_PERIOD_UNIT 换算成毫秒
+                // （各预设取值 5~100，对应 2.5s~50s）
+                delay((preset.colorInterpPeriod * MILLIS_PER_PERIOD_UNIT).toLong())
                 colorStage.animateTo(
                     targetValue = targetStage,
                     animationSpec = spring(dampingRatio = 0.9f, stiffness = 35f),
@@ -105,8 +110,6 @@ fun BgEffectBackground(
                 .bgEffectDraw(
                     painter = painter,
                     preset = preset,
-                    deviceType = deviceType,
-                    isDarkTheme = isDarkTheme,
                     surface = surface,
                     effectBackground = effectBackground,
                     isFullSize = isFullSize,
@@ -126,9 +129,7 @@ private fun shouldShowSplitPane(): Boolean {
     return with(density) {
         val widthDp = windowInfo.containerSize.width.toDp()
         val heightDp = windowInfo.containerSize.height.toDp()
-        val ratio = heightDp / widthDp
-        widthDp >= UIConstants.WIDE_SCREEN_THRESHOLD ||
-            (widthDp >= UIConstants.MEDIUM_WIDTH_THRESHOLD && ratio < UIConstants.PORTRAIT_ASPECT_RATIO_THRESHOLD)
+        UIConstants.isWideScreen(widthDp.value, heightDp.value)
     }
 }
 
@@ -172,11 +173,28 @@ fun BlurredBar(
     }
 }
 
+/** `colorInterpPeriod` 刻度换算为毫秒的系数 */
+private const val MILLIS_PER_PERIOD_UNIT = 500f
+
+/** 卡片背景的混合色 */
+internal fun cardBlendColors(isDark: Boolean): List<BlendColorEntry> =
+    if (isDark) {
+        listOf(
+            BlendColorEntry(Color(0x4DA9A9A9), BlurBlendMode.Luminosity),
+            BlendColorEntry(Color(0x1A9C9C9C), BlurBlendMode.PlusDarker),
+        )
+    } else {
+        listOf(
+            BlendColorEntry(Color(0x340034F9), BlurBlendMode.Overlay),
+            BlendColorEntry(Color(0xB3FFFFFF), BlurBlendMode.HardLight),
+        )
+    }
+
 @Composable
 fun Modifier.cardBlur(
     backdrop: LayerBackdrop?,
     cardBlend: List<BlendColorEntry>,
-    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
+    shape: Shape = RoundedCornerShape(16.dp),
     blurRadius: Float = 60f,
 ): Modifier = this.then(
     if (backdrop != null) {

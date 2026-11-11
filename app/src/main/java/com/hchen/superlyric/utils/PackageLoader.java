@@ -23,6 +23,7 @@ import static com.hchen.superlyric.data.SupportApps.sMediaAppPackages;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.os.Build;
 
 import androidx.annotation.NonNull;
 
@@ -34,18 +35,23 @@ import com.hchen.superlyric.data.apps.ApiAppData;
 
 import java.text.Collator;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 扫描并加载已安装的支持音乐应用列表。
+ * 扫描并加载已安装的支持音乐应用与被支持的 API 应用
  *
- * @author 焕晨HChen
+ * <p>扫描在单线程执行器上串行执行，结果以不可变列表整体替换，任意线程均可读取；
+ * 加载期间的重复请求合并为一次重新扫描。加载失败时完成 future 的异常状态，
+ * 不通知监听器。
+ *
  */
 public final class PackageLoader {
     private static final String TAG = "PackageLoader";
@@ -93,8 +99,7 @@ public final class PackageLoader {
             boolean runAgain;
             synchronized (LOAD_LOCK) {
                 completedFuture = sCurrentLoad;
-                completedLoadCount++;
-                listenersSnapshot = List.copyOf(sPackageLoadedListeners);
+                listenersSnapshot = List.of(sPackageLoadedListeners.toArray(new Runnable[0]));
                 runAgain = rescanRequested;
                 if (runAgain) {
                     rescanRequested = false;
@@ -106,11 +111,15 @@ public final class PackageLoader {
             }
 
             if (failure == null) {
+                synchronized (LOAD_LOCK) {
+                    completedLoadCount++;
+                }
                 completedFuture.complete(null);
+                notifyPackageLoadedListeners(listenersSnapshot);
             } else {
+                // 失败不能通知监听器：监听器只拿到上一次的列表，会把加载失败当成刷新完成。
                 completedFuture.completeExceptionally(failure);
             }
-            notifyPackageLoadedListeners(listenersSnapshot);
 
             if (runAgain) {
                 scheduleLoad(context);
@@ -122,37 +131,45 @@ public final class PackageLoader {
         PackageManager pm = context.getPackageManager();
         List<AppData> mediaApps = new ArrayList<>();
         List<ApiAppData> mediaApiApps = new ArrayList<>();
-        List<PackageInfo> infos = pm.getInstalledPackages(PackageManager.GET_META_DATA);
+        List<PackageInfo> infos;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            infos = pm.getInstalledPackages(
+                PackageManager.PackageInfoFlags.of(PackageManager.GET_META_DATA));
+        } else {
+            infos = pm.getInstalledPackages(PackageManager.GET_META_DATA);
+        }
 
         for (PackageInfo info : infos) {
-            if (sMediaAppPackages.contains(info.packageName)) {
-                mediaApps.add(PackageTool.createAppData(pm, info, true));
-            }
+            try {
+                if (sMediaAppPackages.contains(info.packageName)) {
+                    mediaApps.add(PackageTool.createAppData(pm, info, true));
+                }
 
-            if (info.applicationInfo != null && info.applicationInfo.metaData != null) {
-                boolean isApi = info.applicationInfo.metaData.getBoolean("superlyricapi");
-                if (isApi) {
-                    boolean isXposed = info.applicationInfo.metaData.getBoolean("xposedmodule") ||
-                        hasXposedModule(info.applicationInfo.sourceDir);
-                    if (!isXposed) {
-                        ApiAppData apiAppData = new ApiAppData();
-                        apiAppData.icon = BitmapTool.drawableToBitmap(info.applicationInfo.loadIcon(pm));
-                        apiAppData.label = (String) info.applicationInfo.loadLabel(pm);
-                        apiAppData.packageName = info.applicationInfo.packageName;
-                        apiAppData.versionName = info.versionName;
-                        apiAppData.versionCode = Long.toString(info.getLongVersionCode());
-                        apiAppData.apiVersionName = String.valueOf(info.applicationInfo.metaData.getFloat("superlyricapi_version_name"));
-                        apiAppData.apiVersionCode = String.valueOf(info.applicationInfo.metaData.getInt("superlyricapi_version_code"));
-                        mediaApiApps.add(apiAppData);
+                if (info.applicationInfo != null && info.applicationInfo.metaData != null) {
+                    boolean isApi = info.applicationInfo.metaData.getBoolean("superlyricapi");
+                    if (isApi) {
+                        boolean isXposed = info.applicationInfo.metaData.getBoolean("xposedmodule") ||
+                            hasXposedModule(info.applicationInfo.sourceDir);
+                        if (!isXposed) {
+                            ApiAppData apiAppData = new ApiAppData();
+                            apiAppData.icon = BitmapTool.drawableToBitmap(info.applicationInfo.loadIcon(pm));
+                            apiAppData.label = String.valueOf(info.applicationInfo.loadLabel(pm));
+                            apiAppData.packageName = info.applicationInfo.packageName;
+                            apiAppData.versionName = info.versionName;
+                            apiAppData.versionCode = Long.toString(info.getLongVersionCode());
+                            mediaApiApps.add(apiAppData);
+                        }
                     }
                 }
+            } catch (Throwable t) {
+                AndroidLog.logW(TAG, "Skipping package " + info.packageName, t);
             }
         }
 
         sortAppData(mediaApps);
         sortAppData(mediaApiApps);
-        sMediaApps = List.copyOf(mediaApps);
-        sMediaApiApps = List.copyOf(mediaApiApps);
+        sMediaApps = List.of(mediaApps.toArray(new AppData[0]));
+        sMediaApiApps = List.of(mediaApiApps.toArray(new ApiAppData[0]));
         AndroidLog.logD(TAG, "Successfully loaded package list: media=" + sMediaApps.size() + ", api=" + sMediaApiApps.size());
     }
 
@@ -193,28 +210,24 @@ public final class PackageLoader {
         sPackageLoadedListeners.remove(listener);
     }
 
-    public static <T> void sortAppData(@NonNull List<T> list) {
-        list.sort(new Comparator<T>() {
-            @Override
-            public int compare(T o1, T o2) {
-                String label1 = ((AppData) o1).label.toUpperCase(Locale.ROOT);
-                String label2 = ((AppData) o2).label.toUpperCase(Locale.ROOT);
-                return COLLATOR.compare(label1, label2);
-            }
-        });
+    private static <T extends AppData> void sortAppData(@NonNull List<T> list) {
+        list.sort((o1, o2) -> COLLATOR.compare(
+            o1.label.toUpperCase(Locale.ROOT),
+            o2.label.toUpperCase(Locale.ROOT)));
     }
 
     private static boolean hasXposedModule(@NonNull String apkPath) {
-        try (java.util.zip.ZipFile zipFile = new java.util.zip.ZipFile(apkPath)) {
-            java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = zipFile.entries();
+        try (ZipFile zipFile = new ZipFile(apkPath)) {
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
             while (entries.hasMoreElements()) {
-                java.util.zip.ZipEntry entry = entries.nextElement();
+                ZipEntry entry = entries.nextElement();
                 String name = entry.getName();
                 if (name.startsWith("META-INF/xposed")) {
                     return true;
                 }
             }
-        } catch (Exception ignore) {
+        } catch (Exception e) {
+            AndroidLog.logW(TAG, "Cannot inspect " + apkPath + "; treating it as a non-Xposed app", e);
         }
         return false;
     }

@@ -1,0 +1,601 @@
+/*
+ * This file is part of SuperLyric.
+ *
+ * SuperLyric is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Copyright (C) 2025-2026 HChenX
+ */
+package com.hchen.superlyric.kernel.orchestrate
+
+import com.hchen.superlyric.kernel.identity.TrackIdentity
+import com.hchen.superlyric.kernel.outcome.LyricOutcome
+
+/** 可取消的调度句柄 */
+fun interface Cancellable {
+    fun cancel()
+}
+
+/**
+ * 定时调度抽象。测试时注入假实现即可确定性复现超时与退避
+ */
+interface Scheduler {
+    fun schedule(delayMs: Long, task: () -> Unit): Cancellable
+}
+
+/**
+ * 一个歌词来源
+ *
+ * 线程约束：[start] 由编排器在锁外调用，但仍运行在调用方线程上，因此实现必须快速返回。
+ * 轻量登记可以同步做，任何网络、文件 IO 或加解密都必须放到自己的后台线程，完成后经
+ * [Session.deliver] 回投 ： 在 [start] 里做重 IO 会拖住调用方，进而阻塞超时调度与后续切歌
+ */
+interface LyricSource {
+
+    /** 来源名，仅用于诊断 */
+    val sourceName: String
+
+    /**
+     * 发起一次取词，必须快速返回
+     *
+     *                 可多次调用（编排器以先到者为准，并按代际丢弃过期结果）
+     */
+    fun start(identity: TrackIdentity, session: Session)
+
+    /** 取消进行中的取词 */
+    fun cancel()
+
+    /** 结果回投通道 */
+    fun interface Session {
+        fun deliver(outcome: LyricOutcome)
+    }
+}
+
+/**
+ * 歌词获取编排状态机。
+ *
+ * 状态：IDLE 无活动音轨；RESOLVING_HOOK 等 Hook；FETCHING_API 请求网络源；ACTIVE 已发布；
+ * NO_LYRICS 终态可下发占位；UNAVAILABLE 尚未取得歌词，不得下发占位。
+ *
+ * 每次切歌与停止都自增 epoch，异步回投按 epoch 丢弃过期结果。
+ * 共享状态由 lock 保护；锁内只构造 Plan，锁外执行，不在持锁时做 Binder 发布或来源启动。
+ */
+class LyricOrchestrator(
+    private val hookSource: LyricSource?,
+    private val apiSource: LyricSource?,
+    private val scheduler: Scheduler,
+    private val listener: Listener,
+    private val config: Config = Config(),
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val diagnostics: (String) -> Unit = {},
+) {
+
+    enum class State {
+        IDLE,
+        RESOLVING_HOOK,
+        FETCHING_API,
+        ACTIVE,
+        NO_LYRICS,
+        UNAVAILABLE,
+    }
+
+    /**
+     * 编排结果的下游回调
+     */
+    interface Listener {
+        /**
+         * 确认切换到新曲目，且该曲目尚无歌词
+         *
+         * 下游应据此立即作废上一首的展示：上一首的歌词与当前播放已无关系，
+         * 继续显示会让界面呈现错误内容。具体下发内容由下游决定，
+         * 宿主侧下发切歌包，把空窗期呈现方式交给客户端。
+         */
+        fun onTrackChanged(identity: TrackIdentity) = Unit
+
+        /** 成功取得全量歌词 */
+        fun onLyricResolved(outcome: LyricOutcome.Success)
+
+        /**
+         * 平台或宿主明确说这首没有歌词，这是唯一允许下发「纯音乐」占位的结论
+         *
+         * 与 [onUnavailable] 的区别在于归因：前者由平台或宿主给出结论，后者是本层未取得内容
+         */
+        fun onNoLyrics(identity: TrackIdentity?)
+
+        /** 取词失败且重试耗尽，不得下发占位，应保持等待或留空 */
+        fun onUnavailable(identity: TrackIdentity?)
+
+        /** 播放停止 */
+        fun onIdle()
+
+        /** 状态迁移，供诊断与测试观察 */
+        fun onStateChanged(state: State) = Unit
+    }
+
+    /**
+     * @property hookTimeoutMs       等待 Hook 异步捕获的上限。宿主常在 30~100ms 后才吐出数据，
+     *                               0ms 判定 Hook 失效并转网络会丢掉本次捕获。
+     * @property maxApiAttempts      网络取词的最大尝试次数（含首次）
+     * @property retryBaseDelayMs    指数退避基数
+     * @property provisionalGraceMs  允许"临时身份原地升级"的时间窗口，见 [isProvisionalUpgrade]
+     * @property allowLateHookSuccess 允许 UNAVAILABLE 后接收同曲目的 Hook 成功结果
+     */
+    data class Config @JvmOverloads constructor(
+        val hookTimeoutMs: Long = 800L,
+        val maxApiAttempts: Int = 3,
+        val retryBaseDelayMs: Long = 500L,
+        val provisionalGraceMs: Long = 3_000L,
+        val allowLateHookSuccess: Boolean = false,
+    )
+
+    private val lock = Any()
+
+    @Volatile
+    private var epoch = 0L
+    private var currentIdentity: TrackIdentity? = null
+    private var currentSinceMs = 0L
+    private var apiAttempts = 0
+    private var hookDelivered = false
+    private var apiDelivered = false
+
+    /** 本次取词启动时的身份，重试复用它而不是宿主当前（可能被歌词行污染的）身份 */
+    private var apiIdentity: TrackIdentity? = null
+    private var hookTimeout: Cancellable? = null
+
+    @Volatile
+    var state: State = State.IDLE
+        private set
+
+    /** 当前正在跟踪的音轨；停止后为 null */
+    @Volatile
+    var activeIdentity: TrackIdentity? = null
+        private set
+
+    /** 锁内生成、锁外执行的动作 */
+    private sealed interface Action {
+        data class StartHook(val epoch: Long, val identity: TrackIdentity) : Action
+        data class StartApi(val epoch: Long, val identity: TrackIdentity) : Action
+        data class Resolve(val outcome: LyricOutcome.Success) : Action
+        data object NoLyrics : Action
+        data object Unavailable : Action
+        data object Idle : Action
+        data object CancelHook : Action
+        data object CancelApi : Action
+    }
+
+    /** 一次状态迁移计划；epoch/identity 是计划时的快照 */
+    private class Plan {
+        var newTrack: TrackIdentity? = null
+        var stateChanged: State? = null
+        val actions = ArrayList<Action>()
+        var plannedEpoch: Long = -1L
+        var identity: TrackIdentity? = null
+    }
+
+    fun restoreResolved(identity: TrackIdentity, doc: com.hchen.superlyric.kernel.model.LyricDoc) {
+        require(!doc.isEmpty)
+        val dispatch = synchronized(lock) {
+            epoch++
+            cancelHookTimeoutLocked()
+            currentIdentity = identity
+            activeIdentity = identity
+            currentSinceMs = nowMs()
+            apiAttempts = 0
+            hookDelivered = true
+            apiDelivered = true
+            apiIdentity = null
+            Plan().apply {
+                plannedEpoch = epoch
+                this.identity = identity
+                transitionLocked(State.ACTIVE, this)
+                actions += Action.CancelHook
+                actions += Action.CancelApi
+                actions += Action.Resolve(LyricOutcome.Success(doc))
+            }
+        }
+        execute(dispatch)
+    }
+
+    /**
+     * 切歌。若判定为同一首曲目且已有结果，则保持现状不做重置
+     */
+    fun onTrackChanged(identity: TrackIdentity) {
+        synchronized(lock) { planTrackChanged(identity) }?.let(::execute)
+    }
+
+    /**
+     * Hook 来源回投结果
+     */
+    fun onHookCaptured(capturedEpoch: Long, outcome: LyricOutcome) {
+        synchronized(lock) { planHookCaptured(capturedEpoch, outcome) }?.let(::execute)
+    }
+
+    /**
+     * 停止播放
+     *
+     * 必须清空当前音轨并推进 epoch，使停止前排期的回投与发布全部失效。
+     */
+    fun onPlaybackStopped() {
+        val dispatch = synchronized(lock) {
+            epoch++
+            cancelHookTimeoutLocked()
+            currentIdentity = null
+            currentSinceMs = 0L
+            activeIdentity = null
+            apiAttempts = 0
+            hookDelivered = false
+            apiDelivered = false
+            apiIdentity = null
+
+            Plan().apply {
+                plannedEpoch = epoch
+                transitionLocked(State.IDLE, this)
+                actions += Action.Idle
+                actions += Action.CancelHook
+                actions += Action.CancelApi
+            }
+        }
+        execute(dispatch)
+    }
+
+    /**
+     * @return 待执行的动作；判定为同一首曲目时返回 null
+     */
+    private fun planTrackChanged(identity: TrackIdentity): Plan? {
+        val current = currentIdentity
+        if (current != null) {
+            if (current.matches(identity) || isTitleEnrichment(current, identity)) {
+                // 同一首曲目只刷新元数据，不重启取词；宿主高频改写标题/歌手时
+                // 重启会反复取词，并重复下发占位。
+                currentIdentity = identity
+                activeIdentity = identity
+                return null
+            } else if (isProvisionalUpgrade(current, identity)) {
+                // 同一首歌拿到更权威的标识时原地升级，不推进 epoch、不重启取词。
+                // 推进 epoch 会丢弃在途的取词结果，导致重复取词。
+                currentIdentity = identity
+                activeIdentity = identity
+                currentSinceMs = nowMs()
+                return null
+            }
+        }
+
+        epoch++
+        val startedEpoch = epoch
+        diagnostics(
+            "new track epoch=" + startedEpoch +
+                    " prev=" + current?.stableId + "/" + current?.title +
+                    " next=" + identity.stableId + "/" + identity.title,
+        )
+        cancelHookTimeoutLocked()
+        currentIdentity = identity
+        activeIdentity = identity
+        currentSinceMs = nowMs()
+        apiAttempts = 0
+        hookDelivered = false
+        apiDelivered = false
+        apiIdentity = null
+
+        val dispatch = Plan().apply {
+            newTrack = identity
+            plannedEpoch = startedEpoch
+            this.identity = identity
+        }
+
+        if (hookSource != null) {
+            transitionLocked(State.RESOLVING_HOOK, dispatch)
+            hookTimeout = scheduler.schedule(config.hookTimeoutMs) { onHookTimedOut(startedEpoch) }
+            dispatch.actions += Action.StartHook(startedEpoch, identity)
+        } else {
+            planStartApi(identity, startedEpoch, null, dispatch)
+        }
+        return dispatch
+    }
+
+    /**
+     * 判断是否只是同一平台标识补上了标题段。
+     *
+     * 只在有一侧没有标题段时放宽；两侧都有标题且不同时按换歌处理，避免有声书换集沿用上一集。
+     * 有时间上界，窗口外一律按换歌处理。
+     */
+    private fun isTitleEnrichment(current: TrackIdentity, next: TrackIdentity): Boolean {
+        val age = nowMs() - currentSinceMs
+        if (age < 0L || age > config.provisionalGraceMs) return false
+        val a = TrackIdentity.normalizeStableId(current.stableId) ?: return false
+        val b = TrackIdentity.normalizeStableId(next.stableId) ?: return false
+        if (a == b) return true
+        val aRid = a.substringBefore('#')
+        if (aRid.isEmpty() || aRid != b.substringBefore('#')) return false
+        return !a.contains('#') || !b.contains('#')
+    }
+
+    /**
+     * 判断是否只是同一首歌拿到了更权威的标识。
+     *
+     * 宿主常先给降级标识、稍后再给权威标识；不识别会把第二次上报当成切歌并丢弃已完成的结果。
+     * 判据只用歌手与时长，不比对可能被歌词行污染的标题；只在临时身份的时间窗口内生效。
+     */
+    private fun isProvisionalUpgrade(current: TrackIdentity, next: TrackIdentity): Boolean {
+        // 当前已有权威标识：任何变化都按换歌处理，不做任何放宽
+        if (current.hasStableId) return false
+        // 新标识也不权威：交给 matches 的组合判据，本机制不介入
+        if (!next.hasStableId) return false
+        if (current.source != next.source) return false
+
+        // 已经出结果了就不再放宽：此时"漏判切歌"的代价（展示错歌的歌词）远高于
+        // "误判切歌"的代价（多取一次词），因此一律按换歌处理。
+        if (state == State.ACTIVE) return false
+
+        val age = nowMs() - currentSinceMs
+        if (age < 0L || age > config.provisionalGraceMs) return false
+
+        return TrackIdentity.artistCompatible(current.artist, next.artist) &&
+                TrackIdentity.durationCompatible(current.durationMs, next.durationMs)
+    }
+
+    private fun planHookCaptured(capturedEpoch: Long, outcome: LyricOutcome): Plan? {
+        // 丢弃必须留痕：否则真实取词成果被静默丢弃后，排查时无法判断它是否到过这里
+        if (capturedEpoch != epoch) {
+            diagnostics("dropping hook outcome ${outcome.label}: epoch $capturedEpoch != $epoch")
+            return null
+        }
+        // 超时或失败不等于已取得歌词；尚未发布结果时，仍采纳同一 epoch 的迟到成功。
+        val lateSuccess = hookDelivered &&
+                outcome is LyricOutcome.Success &&
+                ((state == State.FETCHING_API && !apiDelivered) ||
+                        (config.allowLateHookSuccess && state == State.UNAVAILABLE))
+        if (hookDelivered && !lateSuccess) {
+            diagnostics("dropping hook outcome ${outcome.label}: hook already delivered")
+            return null
+        }
+        hookDelivered = true
+        cancelHookTimeoutLocked()
+
+        val dispatch = Plan().apply {
+            plannedEpoch = capturedEpoch
+            identity = currentIdentity
+        }
+
+        if (outcome is LyricOutcome.Success) {
+            if (lateSuccess) {
+                diagnostics("accepting late hook success: epoch=$capturedEpoch, state=$state")
+                // 网络结果已无意义：标记并由 execute 取消在途请求，避免二次发布
+                apiDelivered = true
+                dispatch.actions += Action.CancelApi
+            }
+            transitionLocked(State.ACTIVE, dispatch)
+            dispatch.actions += Action.Resolve(outcome)
+            return dispatch
+        }
+
+        // Hook 侧给不出歌词（无论确定无歌词还是暂时失败），一律交给网络源再试一次
+        val identity = currentIdentity ?: return dispatch
+        planStartApi(identity, epoch, outcome, dispatch)
+        return dispatch
+    }
+
+    private fun planStartApi(
+        identity: TrackIdentity,
+        startEpoch: Long,
+        hookOutcome: LyricOutcome?,
+        dispatch: Plan = Plan(),
+    ): Plan {
+        dispatch.plannedEpoch = startEpoch
+        dispatch.identity = identity
+        if (apiDelivered) return dispatch
+
+        // 两个来源都不存在是 Provider 配置错误，不得与"平台明确说没有歌词"走同一条路：
+        // 那会给每一首歌都下发纯音乐占位，且不留痕迹
+        if (apiSource == null && hookSource == null) {
+            diagnostics("no lyric source configured; refusing to conclude 'no lyrics'")
+            transitionLocked(State.UNAVAILABLE, dispatch)
+            dispatch.actions += Action.Unavailable
+            return dispatch
+        }
+
+        if (apiSource == null) {
+            // 没有可用的网络来源，只能就 Hook 的结论收尾。
+            // 只有宿主明确说"没有歌词"才允许下发占位。`Unsupported`（读不到文件、清洗后
+            // 一行不剩）与"暂时失败"一样都是本层未取得内容，判成纯音乐等于替宿主断言；
+            // 而"清洗后一行不剩"说明宿主提供了歌词行
+            if (hookOutcome is LyricOutcome.NoLyrics) {
+                transitionLocked(State.NO_LYRICS, dispatch)
+                dispatch.actions += Action.NoLyrics
+            } else {
+                transitionLocked(State.UNAVAILABLE, dispatch)
+                dispatch.actions += Action.Unavailable
+            }
+            return dispatch
+        }
+
+        apiIdentity = identity
+        transitionLocked(State.FETCHING_API, dispatch)
+        dispatch.actions += Action.StartApi(startEpoch, identity)
+        return dispatch
+    }
+
+    private fun onHookTimedOut(timedOutEpoch: Long) {
+        val dispatch = synchronized(lock) {
+            if (timedOutEpoch != epoch) return@synchronized null
+            if (state != State.RESOLVING_HOOK) return@synchronized null
+            if (hookDelivered) {
+                // Hook 已交付过，超时任务只是晚到；保留这条记录才能区分
+                // "Hook 没结果"与"Hook 有结果但被别的路径消费"
+                diagnostics("hook timeout fired after the hook had already delivered")
+                return@synchronized null
+            }
+            val identity = currentIdentity ?: return@synchronized null
+            hookDelivered = true
+            // 超时只说明本次未等到结果，不等于"没有歌词"
+            planStartApi(identity, epoch, LyricOutcome.TransientFailure())
+        }
+        dispatch?.let(::execute)
+    }
+
+    private fun planApiCaptured(capturedEpoch: Long, outcome: LyricOutcome): Plan? {
+        if (capturedEpoch != epoch) {
+            diagnostics("dropping api outcome ${outcome.label}: epoch $capturedEpoch != $epoch")
+            return null
+        }
+        if (apiDelivered) {
+            // 契约允许来源多次投递，编排器以先到者为准。没有这道守卫，
+            // 迟到的 NoLyrics 会覆盖已经发布的真歌词，迟到的 Success 会二次广播整首。
+            diagnostics("dropping duplicate api outcome ${outcome.label}")
+            return null
+        }
+
+        val dispatch = Plan().apply {
+            plannedEpoch = capturedEpoch
+            identity = currentIdentity
+        }
+
+        when (outcome) {
+            is LyricOutcome.Success -> {
+                apiDelivered = true
+                transitionLocked(State.ACTIVE, dispatch)
+                dispatch.actions += Action.Resolve(outcome)
+            }
+
+            is LyricOutcome.NoLyrics -> {
+                // 平台明确说"这首没有歌词"，这是允许下发纯音乐占位的唯一来源
+                apiDelivered = true
+                transitionLocked(State.NO_LYRICS, dispatch)
+                dispatch.actions += Action.NoLyrics
+            }
+
+            is LyricOutcome.Unsupported -> {
+                // "这个来源服务不了这一首"（平台无版权、缺少必要标识）不是"平台说没有歌词"：
+                // 请求要么没有发出，要么服务端没有给出该结论。据此下发占位等于替平台断言
+                apiDelivered = true
+                transitionLocked(State.UNAVAILABLE, dispatch)
+                dispatch.actions += Action.Unavailable
+            }
+
+            is LyricOutcome.TransientFailure -> {
+                apiAttempts++
+                if (apiAttempts >= config.maxApiAttempts) {
+                    // 重试耗尽：失败不等于"没有歌词"，不得下发纯音乐占位
+                    apiDelivered = true
+                    transitionLocked(State.UNAVAILABLE, dispatch)
+                    dispatch.actions += Action.Unavailable
+                } else {
+                    // 重试沿用启动时的身份：宿主会把当前歌词行写进标题，
+                    // 用 currentIdentity 会让后续检索拿被污染的曲名去匹配
+                    val identity = apiIdentity ?: currentIdentity
+                    if (identity != null) {
+                        val delay = config.retryBaseDelayMs shl (apiAttempts - 1)
+                        val retryEpoch = epoch
+                        scheduler.schedule(delay) { scheduleRetry(retryEpoch, identity) }
+                    }
+                }
+            }
+        }
+        return dispatch
+    }
+
+    private fun onApiCaptured(capturedEpoch: Long, outcome: LyricOutcome) {
+        synchronized(lock) { planApiCaptured(capturedEpoch, outcome) }?.let(::execute)
+    }
+
+    private fun scheduleRetry(retryEpoch: Long, identity: TrackIdentity) {
+        val dispatch = synchronized(lock) {
+            if (retryEpoch != epoch) return@synchronized null
+            if (state != State.FETCHING_API || apiDelivered) return@synchronized null
+            Plan().apply {
+                plannedEpoch = retryEpoch
+                this.identity = identity
+                actions += Action.StartApi(retryEpoch, identity)
+            }
+        }
+        dispatch?.let(::execute)
+    }
+
+    private fun execute(dispatch: Plan) {
+        // 计划与执行之间可能已经切歌或停止：所有发布与来源启动都必须以计划时的 epoch 为准。
+        // 缺少该检查时，上一首曲目的 resolved/noLyrics 会在 stop 之后照常发布，占位还会挂到新曲目上。
+        if (dispatch.plannedEpoch >= 0L && dispatch.plannedEpoch != epoch) {
+            diagnostics("dropping planned dispatch: epoch " + dispatch.plannedEpoch + " != " + epoch)
+            return
+        }
+
+        if (dispatch.actions.any { it is Action.CancelHook }) hookSource?.cancel()
+        if (dispatch.actions.any { it is Action.CancelApi }) apiSource?.cancel()
+
+        dispatch.newTrack?.let(listener::onTrackChanged)
+
+        // 状态迁移必须先于来源回调：来源可以在 start() 里同步回投并把状态推到 ACTIVE。
+        dispatch.stateChanged?.let(listener::onStateChanged)
+
+        for (action in dispatch.actions) {
+            if (action !is Action.StartHook) continue
+            runCatching {
+                hookSource?.start(action.identity) { outcome -> onHookCaptured(action.epoch, outcome) }
+            }.onFailure {
+                diagnostics("hook source failed to start: ${it.message}")
+                onHookCaptured(action.epoch, LyricOutcome.TransientFailure(it))
+            }
+        }
+
+        for (action in dispatch.actions) {
+            if (action !is Action.StartApi) continue
+            runCatching {
+                apiSource?.start(action.identity) { outcome -> onApiCaptured(action.epoch, outcome) }
+            }.onFailure {
+                diagnostics("api source failed to start: ${it.message}")
+                onApiCaptured(action.epoch, LyricOutcome.TransientFailure(it))
+            }
+        }
+
+        // 来源 start 可能同步重入 stop 或切歌，发布前再次校验计划 epoch。
+        if (dispatch.plannedEpoch >= 0L && dispatch.plannedEpoch != epoch) {
+            diagnostics("dropping planned dispatch after callbacks: epoch " + dispatch.plannedEpoch + " != " + epoch)
+            return
+        }
+
+        // 下游回调在锁外执行；identity 使用计划时快照，不读 activeIdentity。
+        for (action in dispatch.actions) {
+            when (action) {
+                is Action.Resolve -> listener.onLyricResolved(action.outcome)
+                Action.NoLyrics -> listener.onNoLyrics(dispatch.identity)
+                Action.Unavailable -> listener.onUnavailable(dispatch.identity)
+                Action.Idle -> listener.onIdle()
+                is Action.StartHook, is Action.StartApi, Action.CancelHook, Action.CancelApi -> Unit
+            }
+        }
+    }
+
+    private fun cancelHookTimeoutLocked() {
+        hookTimeout?.cancel()
+        hookTimeout = null
+    }
+
+    private fun transitionLocked(next: State, dispatch: Plan) {
+        if (state == next) return
+        state = next
+        dispatch.stateChanged = next
+    }
+
+    /**
+     * 诊断用的稳定标签
+     *
+     * 不得使用 `::class.simpleName`：release 构建下 R8 会把子类名混淆为 `bw0` 一类，
+     * 诊断日志在需要排查时不可读
+     */
+    private val LyricOutcome.label: String
+        get() = when (this) {
+            is LyricOutcome.Success -> "Success"
+            is LyricOutcome.NoLyrics -> "NoLyrics"
+            is LyricOutcome.Unsupported -> "Unsupported"
+            is LyricOutcome.TransientFailure -> "TransientFailure"
+        }
+}

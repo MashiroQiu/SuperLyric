@@ -26,9 +26,8 @@ import com.hchen.hooktool.log.XposedLog;
 import com.hchen.hooktool.utils.PrefsTool;
 
 /**
- * 本地配置读取：日志级别等设置项的取用。
+ * 本地配置读取。
  *
- * @author 焕晨HChen
  */
 public final class LocalConfig {
     private static final String TAG = "ModuleConfig";
@@ -39,7 +38,7 @@ public final class LocalConfig {
         } catch (Throwable e) {
             XposedLog.logE(TAG, e);
         }
-        return 0;
+        return ModuleConfig.LOG_I;
     }
 
     public static int getLogLevelForModule(Context context) {
@@ -48,16 +47,21 @@ public final class LocalConfig {
         } catch (Throwable e) {
             AndroidLog.logE(TAG, e);
         }
-        return 0;
+        return ModuleConfig.LOG_I;
     }
 
+    /**
+     * 将设置项映射为 {@link ModuleConfig} 的日志等级。
+     *
+     * <p>0 映射为 {@code LOG_I}，避免返回 0 后所有日志都被过滤。
+     */
     private static int getLogLevel(int level) {
         return switch (level) {
             case 0 -> ModuleConfig.LOG_I;
             case 1 -> ModuleConfig.LOG_W;
             case 2 -> ModuleConfig.LOG_E;
             case 3 -> ModuleConfig.LOG_D;
-            default -> throw new IllegalStateException("Unexpected value: " + level);
+            default -> ModuleConfig.LOG_I;
         };
     }
 }

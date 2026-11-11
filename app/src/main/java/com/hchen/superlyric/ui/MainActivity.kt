@@ -19,6 +19,7 @@
 package com.hchen.superlyric.ui
 
 import android.os.Bundle
+import android.content.SharedPreferences
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -32,8 +33,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -49,6 +52,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
@@ -66,7 +70,11 @@ import com.hchen.superlyric.ui.screen.HomeLayout
 import com.hchen.superlyric.ui.viewmodel.MainViewModel
 import com.hchen.superlyric.ui.viewmodel.MainViewModelFactory
 import com.hchen.superlyric.utils.PackageLoader
-import com.hchen.superlyricapi.SuperLyricHelper
+import com.hchen.superlyricapi.SuperLyric
+import com.hjq.permissions.OnPermissionCallback
+import com.hjq.permissions.XXPermissions
+import com.hjq.permissions.permission.PermissionLists
+import com.hjq.permissions.permission.base.IPermission
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -92,14 +100,35 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import top.yukonga.miuix.kmp.window.WindowDialog
 
+import java.util.function.Consumer
+
 class MainActivity : ComponentActivity() {
+
+    /**
+     * 本次注册到 [Application] 静态表的 prefs 监听器，供 [onDestroy] 精确摘除
+     *
+     * 可空：`onCreate` 在赋值前抛异常时 `onDestroy` 仍会被调用，读取未初始化的
+     * `lateinit` 字段会再次抛出，把启动失败升级为崩溃
+     */
+    private var prefsReadyListener: Consumer<SharedPreferences>? = null
+    private val appListPermission by lazy { PermissionLists.getGetInstalledAppsPermission() }
+
+    /**
+     * 进入页面时是否已具备读取应用列表的权限
+     *
+     * 记录进入时的状态，[onResume] 只在"无 -> 有"时重新扫描。
+     * 每次回到前台都重扫会让一次普通的后台切换也触发全量包扫描。
+     */
+    private var appListPermissionGranted = false
+
     private val viewModel: MainViewModel by viewModels {
         MainViewModelFactory(
             addPrefsReadyListener = Application::addPrefsReadyListener,
             removePrefsReadyListener = Application::removePrefsReadyListener,
             addAppLoadedListener = PackageLoader::addPackageLoadedListener,
             removeAppLoadedListener = PackageLoader::removePackageLoadedListener,
-            reloadApps = { PackageLoader.loadPackages(applicationContext) }
+            // 使用进程级 context，避免 lambda 捕获在配置变更后仍存活的 Activity
+            reloadApps = { PackageLoader.loadPackages(Application.getAppContext()) }
         )
     }
 
@@ -107,14 +136,58 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         window.isNavigationBarContrastEnforced = false
-        Application.addPrefsReadyListener {
-            PackageLoader.loadPackages(this)
+        appListPermissionGranted = hasAppListPermission()
+        // 监听器注册在静态表上，不随 Activity 销毁而注销：捕获 Activity 会让每次重建
+        // 泄漏一个已销毁实例，后续 prefs 就绪时还会对已销毁实例调用 loadPackages
+        val appContext = applicationContext
+        // 必须在 onDestroy 摘除：静态表只增不减会让每次重建多留一个监听器，
+        // prefs 就绪时 loadPackages 会重复执行
+        val listener = Consumer<SharedPreferences> {
+            PackageLoader.loadPackages(appContext)
         }
+        prefsReadyListener = listener
+        Application.addPrefsReadyListener(listener)
         PackageLoader.loadPackages(this)
 
         setContent {
             App()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 覆盖从系统设置返回的授权；对话框内授权由回调处理
+        if (!appListPermissionGranted && hasAppListPermission()) {
+            onAppListPermissionGranted()
+        }
+    }
+
+    private fun hasAppListPermission(): Boolean =
+        XXPermissions.isGrantedPermission(this, appListPermission)
+
+    private fun requestAppListPermission(onGranted: () -> Unit, onDenied: () -> Unit) {
+        XXPermissions.with(this)
+            .permission(appListPermission)
+            .request(object : OnPermissionCallback {
+                override fun onPermissionResult(
+                    granted: MutableList<IPermission>,
+                    denied: MutableList<IPermission>
+                ) {
+                    if (denied.isEmpty()) onGranted() else onDenied()
+                }
+            })
+    }
+
+    override fun onDestroy() {
+        // 摘除的必须是本次注册的实例：静态表按实例移除
+        prefsReadyListener?.let(Application::removePrefsReadyListener)
+        super.onDestroy()
+    }
+
+    private fun onAppListPermissionGranted() {
+        if (appListPermissionGranted) return
+        appListPermissionGranted = true
+        PackageLoader.loadPackages(applicationContext)
     }
 
     @Composable
@@ -133,15 +206,16 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val permission = remember { appListPermission }
+        var showAppListPermission by remember { mutableStateOf(!appListPermissionGranted) }
+        var permissionDenied by remember {
+            mutableStateOf(XXPermissions.isDoNotAskAgainPermission(this@MainActivity, permission))
+        }
+
         var showUnavailable by remember { mutableStateOf(false) }
-        var unavailableReason by remember { mutableStateOf("") }
         LaunchedEffect(Unit) {
-            if (!SuperLyricHelper.isAvailable()) {
-                val errorMsg = runCatching { SuperLyricHelper.registerPublisher() }
-                    .exceptionOrNull()?.message ?: "Unknown"
-                unavailableReason = errorMsg
-                showUnavailable = true
-            }
+            // 只探测服务是否存在；isAvailable() 会分别尝试两个服务名
+            if (!SuperLyric.isAvailable()) showUnavailable = true
         }
 
         CompositionLocalProvider(
@@ -151,8 +225,7 @@ class MainActivity : ComponentActivity() {
         ) {
             MiuixTheme(controller = ThemeController(ColorSchemeMode.System)) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    val isWideScreen = maxWidth > UIConstants.WIDE_SCREEN_THRESHOLD ||
-                            (maxWidth > UIConstants.MEDIUM_WIDTH_THRESHOLD && (maxHeight.value / maxWidth.value < UIConstants.PORTRAIT_ASPECT_RATIO_THRESHOLD))
+                    val isWideScreen = UIConstants.isWideScreen(maxWidth.value, maxHeight.value)
                     if (isWideScreen) {
                         WideScreenLayout()
                     } else {
@@ -164,12 +237,59 @@ class MainActivity : ComponentActivity() {
             WindowDialog(
                 show = showUnavailable,
                 title = stringResource(R.string.warn),
-                summary = stringResource(R.string.service_unavailable, unavailableReason)
+                summary = stringResource(R.string.service_unavailable)
             ) {
                 Row(horizontalArrangement = Arrangement.Absolute.SpaceBetween) {
                     TextButton(
                         text = stringResource(android.R.string.ok),
                         onClick = { showUnavailable = false },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.textButtonColorsPrimary()
+                    )
+                }
+            }
+
+            WindowDialog(
+                show = showAppListPermission,
+                title = stringResource(R.string.app_list_permission_title),
+                summary = stringResource(
+                    if (permissionDenied) R.string.app_list_permission_denied_summary
+                    else R.string.app_list_permission_summary
+                )
+            ) {
+                Row(horizontalArrangement = Arrangement.Absolute.SpaceBetween) {
+                    TextButton(
+                        text = stringResource(android.R.string.cancel),
+                        onClick = { showAppListPermission = false },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(20.dp))
+                    TextButton(
+                        text = stringResource(
+                            if (permissionDenied) R.string.go_to_settings else R.string.grant
+                        ),
+                        onClick = {
+                            if (permissionDenied) {
+                                XXPermissions.startPermissionActivity(
+                                    this@MainActivity, permission
+                                )
+                                showAppListPermission = false
+                            } else {
+                                requestAppListPermission(
+                                    onGranted = {
+                                        permissionDenied = false
+                                        showAppListPermission = false
+                                        onAppListPermissionGranted()
+                                    },
+                                    onDenied = {
+                                        permissionDenied =
+                                            XXPermissions.isDoNotAskAgainPermission(
+                                                this@MainActivity, permission
+                                            )
+                                    }
+                                )
+                            }
+                        },
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.textButtonColorsPrimary()
                     )
@@ -298,8 +418,8 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun UiContent(
         paddingValues: PaddingValues,
-        isWideScreen: Boolean = false,
-        modifier: Modifier = Modifier
+        modifier: Modifier = Modifier,
+        isWideScreen: Boolean = false
     ) {
         val pagerState = LocalPagerState.current
         HorizontalPager(
@@ -312,15 +432,15 @@ class MainActivity : ComponentActivity() {
         ) { page ->
             when (page) {
                 UIConstants.HOME_PAGE_INDEX -> {
-                    HomeLayout(paddingValues, isWideScreen)
+                    HomeLayout(paddingValues, isWideScreen = isWideScreen)
                 }
 
                 UIConstants.API_PAGE_INDEX -> {
-                    ApiLayout(paddingValues, isWideScreen)
+                    ApiLayout(paddingValues)
                 }
 
                 UIConstants.ABOUT_PAGE_INDEX -> {
-                    AboutLayout(paddingValues, isWideScreen)
+                    AboutLayout(paddingValues)
                 }
             }
         }
@@ -329,7 +449,7 @@ class MainActivity : ComponentActivity() {
     private data class NavigationItemData(
         val index: Int,
         val labelRes: Int,
-        val icon: androidx.compose.ui.graphics.vector.ImageVector
+        val icon: ImageVector
     )
 
     private val navigationItems = listOf(
@@ -337,4 +457,4 @@ class MainActivity : ComponentActivity() {
         NavigationItemData(UIConstants.API_PAGE_INDEX, R.string.api, MiuixIcons.Music),
         NavigationItemData(UIConstants.ABOUT_PAGE_INDEX, R.string.about, MiuixIcons.Info)
     )
-}
+}

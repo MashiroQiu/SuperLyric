@@ -1,15 +1,28 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
+// Root project build configuration.
 buildscript {
     repositories {
         google()
         mavenCentral()
     }
     dependencies {
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21"
     }
 }
 
 plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.android.library) apply false
+}
+
+subprojects {
+    // 项目代码的编译门禁：第三方 classfile/auxiliary/processing 提示不计入；3.x deprecation
+    // 只在确切的 Binder 边界文件内局部抑制，不在这里全局关闭。
+    tasks.withType(JavaCompile).configureEach {
+        options.compilerArgs += ['-Xlint:all,-classfile,-auxiliaryclass,-processing', '-Werror']
+    }
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        compilerOptions {
+            allWarningsAsErrors.set(true)
+        }
+    }
 }

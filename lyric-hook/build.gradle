@@ -1,0 +1,36 @@
+plugins {
+    alias(libs.plugins.android.library)
+}
+
+android {
+    namespace "com.hchen.superlyric.lyrichook"
+    compileSdk {
+        version = release(37)
+    }
+
+    defaultConfig {
+        minSdk 30
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    testOptions {
+        unitTests.all {
+            it.useJUnitPlatform()
+        }
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    api project(':shared')
+    implementation project(':hook-anchors')
+    implementation libs.hooktool
+
+    testImplementation platform(libs.junit.bom)
+    testImplementation libs.junit.jupiter
+    testRuntimeOnly libs.junit.platform.launcher
+}
