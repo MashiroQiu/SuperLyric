@@ -28,6 +28,7 @@ import com.hchen.superlyricapi.model.Stop
 import io.github.proify.lyricon.lyric.model.Song
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
+import io.github.proify.lyricon.provider.ConnectionListener
 import java.util.concurrent.Executors
 
 /** All view/provider state is main-thread-owned; Binder registration runs off the UI thread. */
@@ -47,25 +48,59 @@ object LyriconBridge {
     private var cachedLyric: com.hchen.superlyricapi.model.Lyric? = null
     private var lastPlayback: PlaybackState? = null
     private var retryCount = 0
+    private var providerRetryCount = 0
+    private var inputVersion = 0L
     private var manager: MediaSessionManager? = null
     private var controller: MediaController? = null
     private var callback: MediaController.Callback? = null
     private val retry = Runnable { register() }
+    private val providerRetry = Runnable { if (screenOn) provider?.register() }
+    private val connectionListener = object : ConnectionListener {
+        override fun onConnected(provider: LyriconProvider) = connected(provider)
+        override fun onReconnected(provider: LyriconProvider) = connected(provider)
+        override fun onDisconnected(provider: LyriconProvider) = reconnect(provider)
+        override fun onConnectTimeout(provider: LyriconProvider) = reconnect(provider)
+    }
+
+    private fun connected(source: LyriconProvider) { handler.post { safely {
+        if (source !== provider) return@safely
+        handler.removeCallbacks(providerRetry)
+        providerRetryCount = 0
+        bindController()
+        if (screenOn) lastPlayback?.let { source.player.setPlaybackState(it) }
+        else source.player.setPlaybackState(false)
+        Log.i(TAG, "Output connected: $publisher")
+    } } }
+
+    private fun reconnect(source: LyriconProvider) { handler.post { safely {
+        if (source !== provider || !screenOn) return@safely
+        handler.removeCallbacks(providerRetry)
+        handler.postDelayed(providerRetry, retryDelay(providerRetryCount++))
+        Log.w(TAG, "Output reconnect scheduled: $publisher")
+    } } }
     private val listener = object : LyricListener {
-        override fun onLyric(view: LyricView) { if (retiring) return; handler.post { safely { if (screenOn) receive(view) } } }
+        override fun onLyric(view: LyricView) { if (retiring) return; handler.post { safely {
+            inputVersion++
+            if (screenOn) receive(view)
+        } } }
         override fun onStop(stop: Stop) { if (retiring) return; handler.post { safely {
+            inputVersion++
             if (stop.publisher == null || stop.publisher == publisher) {
                 provider?.player?.setPlaybackState(false)
             }
         } } }
     }
-    private val sessions = MediaSessionManager.OnActiveSessionsChangedListener { safely { bindController() } }
+    private val sessions = MediaSessionManager.OnActiveSessionsChangedListener { safely {
+        bindController()
+        if (retryCount > 0) register()
+    } }
     private val broadcasts = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) { safely {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
                     screenOn = false
                     handler.removeCallbacks(retry)
+                    handler.removeCallbacks(providerRetry)
                     provider?.player?.setPlaybackState(false)
                     unbindController()
                     manager?.removeOnActiveSessionsChangedListener(sessions)
@@ -75,6 +110,8 @@ object LyriconBridge {
                 Intent.ACTION_SCREEN_ON -> {
                     screenOn = true
                     retryCount = 0
+                    providerRetryCount = 0
+                    provider?.register()
                     manager?.addOnActiveSessionsChangedListener(sessions, null, handler)
                     register()
                 }
@@ -85,6 +122,7 @@ object LyriconBridge {
                         releaseProvider()
                         createProvider(playerPackage)
                         provider?.player?.setSong(song)
+                        cachedSong = song
                         provider?.player?.setDisplayTranslation(true)
                         lastPlayback = playback
                         if (screenOn) playback?.let { provider?.player?.setPlaybackState(it) }
@@ -92,8 +130,11 @@ object LyriconBridge {
                     }
                     if (screenOn) register()
                 }
-                SERVICE_READY -> if (screenOn) {
-                    worker.execute { runCatching { com.hchen.superlyric.reload.SdkWorkers.resetTransport() }
+                SERVICE_READY, Intent.ACTION_USER_UNLOCKED -> if (screenOn) {
+                    worker.execute { runCatching {
+                        SuperLyric.receiver().unregister(listener)
+                        com.hchen.superlyric.reload.SdkWorkers.resetTransport()
+                    }
                         .onFailure { Log.w(TAG, "Transport reset failed", it) } }
                     retryCount = 0; register()
                 }
@@ -109,6 +150,7 @@ object LyriconBridge {
         ContextCompat.registerReceiver(app!!, broadcasts, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF)
             addAction(CENTRAL_BOOT); addAction(SERVICE_READY)
+            addAction(Intent.ACTION_USER_UNLOCKED)
         }, ContextCompat.RECEIVER_EXPORTED)
         broadcastRegistered = true
         if (screenOn) {
@@ -120,6 +162,7 @@ object LyriconBridge {
     private fun register() {
         handler.removeCallbacks(retry)
         if (retiring || !screenOn) return
+        val version = inputVersion
         worker.execute {
             val registered = runCatching { SuperLyric.receiver().register(listener) == Receiver.RegisterResult.OK }
                 .getOrDefault(false)
@@ -128,9 +171,14 @@ object LyriconBridge {
                 if (!screenOn) return@safely
                 if (registered) {
                     retryCount = 0
-                    if (latest != null) receive(latest)
-                    else provider?.player?.setPlaybackState(false)
-                } else if (++retryCount < 6) handler.postDelayed(retry, 5_000)
+                    if (inputVersion == version) {
+                        if (latest != null) receive(latest)
+                        else provider?.player?.setPlaybackState(false)
+                    }
+                } else {
+                    handler.postDelayed(retry, retryDelay(retryCount++))
+                    Log.w(TAG, "Input unavailable; retry scheduled")
+                }
             } }
         }
     }
@@ -140,7 +188,9 @@ object LyriconBridge {
         provider = LyriconFactory.createProvider(context, providerPackageName = BuildConfig.APPLICATION_ID,
             playerPackageName = packageName, processName = null).also {
             ProviderWorkers.track(it)
-            it.autoSync = false
+            // Registration completes asynchronously; replay cached song and native clock on connect.
+            it.autoSync = true
+            it.service.addConnectionListener(connectionListener)
             it.register()
         }
         publisher = packageName
@@ -213,7 +263,10 @@ object LyriconBridge {
 
     private fun releaseProvider() {
         unbindController()
+        handler.removeCallbacks(providerRetry)
+        providerRetryCount = 0
         provider?.let { previous ->
+            previous.service.removeConnectionListener(connectionListener)
             runCatching { previous.player.setPlaybackState(false); previous.player.setSong(null) }
             previous.destroy()
             ProviderWorkers.release(previous)
@@ -245,4 +298,6 @@ object LyriconBridge {
         if (retiring) return
         try { action() } catch (error: Exception) { Log.e(TAG, "Bridge operation failed", error) }
     }
+
+    internal fun retryDelay(attempt: Int): Long = 1_000L shl attempt.coerceIn(0, 5)
 }
