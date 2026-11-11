@@ -10,6 +10,8 @@ Central restart restores the cached song as well as sending it. Native MediaSess
 
 Validation covers cached SDK replay before connection, a second player's song after pausing the first, and the latest song after reconnection. These are JVM SDK behavior tests, not a device-level test of focus changes, startup or native Binder delivery. The full module suites and APK builds are run for the release candidate; device observations are still required.
 
+R2 validation: 477 tests pass across the eight modules; debug and signed release builds pass.
+
 Both R2 APKs use the same signing key as the preceding paired release and have larger version codes. They can cover that release without uninstalling. The still older signing certificate remains incompatible.
 
 Device checks: reboot and play immediately; switch players while playing; pause the first and play the second; switch back; lock/unlock; update through LSPosed hot reload. Inspect logcat tags SuperLyric-Lyricon, CentralConnection, RegistrationDispatcher and SLDiag if output is still absent.
