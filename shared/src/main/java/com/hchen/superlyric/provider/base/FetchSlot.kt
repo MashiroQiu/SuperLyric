@@ -35,6 +35,7 @@ class FetchSlot(private val executor: Executor = FETCH_POOL) {
 
     private val sequence = AtomicLong()
     private val calls = ConcurrentHashMap.newKeySet<Call>()
+    private val requestToken = ThreadLocal<Long>()
 
     /** 开始新请求并使旧请求失效。 */
     fun open(): Long = sequence.incrementAndGet()
@@ -53,6 +54,11 @@ class FetchSlot(private val executor: Executor = FETCH_POOL) {
     fun <T> withCall(call: Call, block: () -> T): T {
         calls.add(call)
         try {
+            val token = requestToken.get()
+            if (token != null && !isCurrent(token)) {
+                call.cancel()
+                throw java.io.InterruptedIOException("Lyric request superseded")
+            }
             return block()
         } finally {
             calls.remove(call)
@@ -76,11 +82,16 @@ class FetchSlot(private val executor: Executor = FETCH_POOL) {
         val token = open()
         execute {
             if (!isCurrent(token)) return@execute
-            val outcome = runCatching { resolve(token) }.getOrElse {
-                AndroidLog.logW(tag, "Fetch failed: " + it.message)
-                LyricOutcome.TransientFailure(it)
+            requestToken.set(token)
+            try {
+                val outcome = runCatching { resolve(token) }.getOrElse {
+                    AndroidLog.logW(tag, "Fetch failed: " + it.message)
+                    LyricOutcome.TransientFailure(it)
+                }
+                if (isCurrent(token)) session.deliver(outcome)
+            } finally {
+                requestToken.remove()
             }
-            if (isCurrent(token)) session.deliver(outcome)
         }
     }
 

@@ -115,6 +115,36 @@ class FetchSlotTest {
     }
 
     @Test
+    fun `cancelled resolution cannot start another HTTP call`() {
+        val call = FakeCall()
+        var executed = false
+        var delivered = false
+        slot.launch("test", { delivered = true }) {
+            slot.invalidate()
+            slot.withCall(call) {
+                executed = true
+                LyricOutcome.NoLyrics("none")
+            }
+        }
+        assertFalse(executed)
+        assertFalse(delivered)
+        assertTrue(call.cancelled)
+    }
+
+    @Test
+    fun `reused worker thread does not retain a completed request token`() {
+        slot.launch("test", {}) {
+            slot.invalidate()
+            LyricOutcome.NoLyrics("none")
+        }
+        val call = FakeCall()
+        var executed = false
+        slot.withCall(call) { executed = true }
+        assertTrue(executed)
+        assertFalse(call.cancelled)
+    }
+
+    @Test
     fun `withCall cancels and cleans up when the block throws`() {
         val call = FakeCall()
 

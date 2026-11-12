@@ -31,7 +31,7 @@ android {
 
 dependencies {
     api project(':lyric-kernel')
-    api libs.superlyricapi
+    api project(':superlyric-api')
     implementation libs.gson
     implementation libs.okhttp
     compileOnly libs.api

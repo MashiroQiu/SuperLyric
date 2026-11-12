@@ -136,7 +136,7 @@ dependencies {
     compileOnly libs.api
     implementation libs.service
     implementation libs.hooktool
-    implementation libs.superlyricapi
+    implementation project(':superlyric-api')
     implementation libs.xxpermissions
     implementation project(':lyric-kernel')
     implementation project(':shared')

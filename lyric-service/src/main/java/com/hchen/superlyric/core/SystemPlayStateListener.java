@@ -22,11 +22,11 @@ import android.content.Context;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
+import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -34,6 +34,9 @@ import androidx.annotation.Nullable;
 import com.hchen.hooktool.log.XposedLog;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,13 +53,12 @@ public final class SystemPlayStateListener {
     private static final String TAG = "SystemPlayStateListener";
 
     @NonNull
-    private final Context mContext;
-    @NonNull
     private final LyricRuntime mRuntime;
     @NonNull
     private final MediaSessionManager mMediaSessionManager;
     @NonNull
-    private final ConcurrentHashMap<MediaController, MediaControllerCallback> mCallbacks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<MediaSession.Token, MediaControllerCallback> mCallbacks = new ConcurrentHashMap<>();
+    private volatile Map<String, MediaSession.Token> preferredTokens = new HashMap<>();
     @NonNull
     private final Handler mCallbackHandler;
     private final HandlerThread callbackThread;
@@ -70,21 +72,28 @@ public final class SystemPlayStateListener {
 
             long token = Binder.clearCallingIdentity();
             try {
-                // 锁内只做 map 维护。注册/反注册会对宿主做 Binder 调用并可能同步回调进
-                // LyricRuntime；放到锁外，避免主线程持锁等待宿主 Binder。
-                List<Map.Entry<MediaController, MediaControllerCallback>> toUnregister;
-                List<MediaController> toRegister;
-                synchronized (mCallbacks) {
-                    // controller 与回调对象必须成对取出：清空 map 后再 get 只会得到 null
-                    toUnregister = new ArrayList<>(mCallbacks.entrySet());
-                    mCallbacks.clear();
-                    toRegister = new ArrayList<>(controllers);
+                Map<String, MediaSession.Token> preferred = new HashMap<>();
+                Set<String> playing = new HashSet<>();
+                Set<MediaSession.Token> activeTokens = new HashSet<>();
+                for (MediaController controller : controllers) {
+                    String pkg = controller.getPackageName();
+                    activeTokens.add(controller.getSessionToken());
+                    PlaybackState state = controller.getPlaybackState();
+                    boolean isPlaying = state != null && state.getState() == PlaybackState.STATE_PLAYING;
+                    if (!preferred.containsKey(pkg) || (isPlaying && !playing.contains(pkg))) {
+                        preferred.put(pkg, controller.getSessionToken());
+                    }
+                    if (isPlaying) playing.add(pkg);
                 }
-                for (Map.Entry<MediaController, MediaControllerCallback> entry : toUnregister) {
-                    entry.getKey().unregisterCallback(entry.getValue());
+                synchronized (mCallbacks) { preferredTokens = preferred; }
+                for (Map.Entry<MediaSession.Token, MediaControllerCallback> entry : new ArrayList<>(mCallbacks.entrySet())) {
+                    if (!activeTokens.contains(entry.getKey()) && mCallbacks.remove(entry.getKey(), entry.getValue())) {
+                        entry.getValue().mController.unregisterCallback(entry.getValue());
+                    }
                 }
-                for (MediaController controller : toRegister) {
-                    registerMediaControllerCallback(controller);
+                // Android orders sessions by priority; apply the highest-priority initial snapshot last.
+                for (int i = controllers.size() - 1; i >= 0; i--) {
+                    registerMediaControllerCallback(controllers.get(i));
                 }
             } finally {
                 Binder.restoreCallingIdentity(token);
@@ -93,25 +102,35 @@ public final class SystemPlayStateListener {
     };
 
     public SystemPlayStateListener(@NonNull Context context, @NonNull LyricRuntime runtime) {
-        mContext = context;
-        mRuntime = runtime;
-        mMediaSessionManager = (MediaSessionManager) mContext.getSystemService(Context.MEDIA_SESSION_SERVICE);
+        this(runtime, (MediaSessionManager) context.getSystemService(Context.MEDIA_SESSION_SERVICE), startThread());
+    }
 
-        // 进程级单例：LyricRuntime/监听器随 system_server 存活到进程结束，没有 teardown 路径，
-        // 因此不主动 quit；HandlerThread 设为 daemon，避免异常退出时拖住进程。
-        callbackThread = new HandlerThread("SuperLyric-MediaSession");
-        callbackThread.setDaemon(true);
-        callbackThread.start();
-        mCallbackHandler = new Handler(callbackThread.getLooper());
+    private SystemPlayStateListener(LyricRuntime runtime, MediaSessionManager manager, HandlerThread thread) {
+        this(runtime, manager, new Handler(thread.getLooper()), thread);
+    }
+
+    SystemPlayStateListener(LyricRuntime runtime, MediaSessionManager manager, Handler handler, HandlerThread thread) {
+        mRuntime = runtime;
+        mMediaSessionManager = manager;
+        mCallbackHandler = handler;
+        callbackThread = thread;
+    }
+
+    private static HandlerThread startThread() {
+        HandlerThread thread = new HandlerThread("SuperLyric-MediaSession");
+        thread.setDaemon(true);
+        thread.start();
+        return thread;
     }
 
     public void closeForReload() {
         closed = true;
         mMediaSessionManager.removeOnActiveSessionsChangedListener(mListener);
-        for (Map.Entry<MediaController, MediaControllerCallback> item : mCallbacks.entrySet()) {
-            item.getKey().unregisterCallback(item.getValue());
+        for (MediaControllerCallback callback : mCallbacks.values()) {
+            callback.mController.unregisterCallback(callback);
         }
         mCallbacks.clear();
+        preferredTokens = new HashMap<>();
         mCallbackHandler.removeCallbacksAndMessages(null);
         callbackThread.quitSafely();
         try {
@@ -130,9 +149,7 @@ public final class SystemPlayStateListener {
     public boolean register() {
         long token = Binder.clearCallingIdentity();
         try {
-            for (MediaController controller : mMediaSessionManager.getActiveSessions(null)) {
-                registerMediaControllerCallback(controller);
-            }
+            mListener.onActiveSessionsChanged(mMediaSessionManager.getActiveSessions(null));
             mMediaSessionManager.addOnActiveSessionsChangedListener(mListener, null, mCallbackHandler);
             return true;
         } catch (Throwable t) {
@@ -152,38 +169,21 @@ public final class SystemPlayStateListener {
         if (mRuntime.isSystemPlayStateListenerDisabled(packageName)) return;
         long token = Binder.clearCallingIdentity();
         try {
-            for (Map.Entry<MediaController, MediaControllerCallback> entry : mCallbacks.entrySet()) {
-                MediaController controller = entry.getKey();
-                if (TextUtils.equals(controller.getPackageName(), packageName)) {
-                    MediaControllerCallback callback = entry.getValue();
-                    // 状态读取与 runtime 回调统一在回调线程执行；调用方可能来自 Binder 线程。
-                    mCallbackHandler.post(() -> {
-                        // 入队后 controller 可能已注销/替换；与首次同步同一检查。
-                        if (mCallbacks.get(controller) != callback) return;
-                        if (mRuntime.isSystemPlayStateListenerDisabled(packageName)) return;
-                        try {
-                            PlaybackState state = controller.getPlaybackState();
-                            if (state != null) {
-                                mRuntime.onSystemPlaybackStateChanged(packageName, state);
-                            }
-                            MediaMetadata metadata = controller.getMetadata();
-                            if (metadata != null) {
-                                mRuntime.onSystemMetadataChanged(packageName, metadata);
-                            }
-                        } catch (Throwable t) {
-                            XposedLog.logW(TAG, "Failed to sync state for package " + packageName, t);
-                        }
-                    });
-                    return;
-                }
-            }
-
+            MediaController preferred = null;
             for (MediaController controller : mMediaSessionManager.getActiveSessions(null)) {
-                if (TextUtils.equals(controller.getPackageName(), packageName)) {
-                    registerMediaControllerCallback(controller);
-                    return;
+                if (!packageName.equals(controller.getPackageName())) continue;
+                if (preferred == null) preferred = controller;
+                PlaybackState state = controller.getPlaybackState();
+                if (state != null && state.getState() == PlaybackState.STATE_PLAYING) {
+                    preferred = controller;
+                    break;
                 }
             }
+            if (preferred == null) return;
+            select(preferred);
+            MediaControllerCallback callback = mCallbacks.get(preferred.getSessionToken());
+            if (callback != null) mCallbackHandler.post(callback::syncLatest);
+            else registerMediaControllerCallback(preferred);
         } catch (Throwable t) {
             XposedLog.logW(TAG, "Failed to sync state for package " + packageName, t);
         } finally {
@@ -195,51 +195,22 @@ public final class SystemPlayStateListener {
         if (closed) return;
         long token = Binder.clearCallingIdentity();
         try {
+            MediaSession.Token sessionToken = controller.getSessionToken();
+            if (mCallbacks.containsKey(sessionToken)) return;
             MediaControllerCallback callback = new MediaControllerCallback(controller);
-            synchronized (mCallbacks) {
-                if (mCallbacks.containsKey(controller)) {
-                    return;
-                }
+            if (mCallbacks.putIfAbsent(sessionToken, callback) != null) return;
+            try {
+                controller.registerCallback(callback, mCallbackHandler);
+            } catch (Throwable error) {
+                mCallbacks.remove(sessionToken, callback);
+                throw error;
             }
-
-            // 注册是 Binder 调用，不得在 mCallbacks 锁内执行；并发注册由 putIfAbsent 收口。
-            controller.registerCallback(callback, mCallbackHandler);
-            MediaControllerCallback previous;
-            synchronized (mCallbacks) {
-                if (closed) {
-                    controller.unregisterCallback(callback);
-                    return;
-                }
-                previous = mCallbacks.putIfAbsent(controller, callback);
-            }
-            if (previous != null) {
-                try {
-                    controller.unregisterCallback(callback);
-                } catch (Throwable t) {
-                    XposedLog.logW(TAG, "Failed to drop duplicate callback for "
-                        + controller.getPackageName(), t);
-                }
+            if (closed || mCallbacks.get(sessionToken) != callback) {
+                controller.unregisterCallback(callback);
+                mCallbacks.remove(sessionToken, callback);
                 return;
             }
-
-            // 首次同步也必须在回调线程执行：register() 由 AMS#systemReady 调用，
-            // 直接读状态并回调会把 runtime 逻辑放回 system_server 主线程。
-            mCallbackHandler.post(() -> {
-                if (mCallbacks.get(controller) != callback) return;
-                try {
-                    PlaybackState state = controller.getPlaybackState();
-                    if (state != null) {
-                        callback.onPlaybackStateChanged(state);
-                    }
-                    MediaMetadata metadata = controller.getMetadata();
-                    if (metadata != null) {
-                        callback.onMetadataChanged(metadata);
-                    }
-                } catch (Throwable t) {
-                    XposedLog.logW(TAG, "Failed to sync initial state for "
-                        + controller.getPackageName(), t);
-                }
-            });
+            mCallbackHandler.post(callback::syncLatest);
         } catch (Throwable t) {
             XposedLog.logW(TAG, "Failed to register callback for controller: "
                 + controller.getPackageName(), t);
@@ -248,19 +219,62 @@ public final class SystemPlayStateListener {
         }
     }
 
+    private void select(MediaController controller) {
+        synchronized (mCallbacks) {
+            Map<String, MediaSession.Token> next = new HashMap<>(preferredTokens);
+            next.put(controller.getPackageName(), controller.getSessionToken());
+            preferredTokens = next;
+        }
+    }
+
     private class MediaControllerCallback extends MediaController.Callback {
         @NonNull
         private final MediaController mController;
+        private volatile PlaybackState lastState;
 
         private MediaControllerCallback(@NonNull MediaController controller) {
             mController = controller;
+            lastState = controller.getPlaybackState();
+        }
+
+        private boolean isCurrent() {
+            return !closed && mCallbacks.get(mController.getSessionToken()) == this;
+        }
+
+        private boolean isPreferred() {
+            return mController.getSessionToken().equals(preferredTokens.get(mController.getPackageName()));
+        }
+
+        private void syncLatest() {
+            if (!isCurrent() || !isPreferred()) return;
+            try {
+                MediaMetadata metadata = mController.getMetadata();
+                if (metadata != null) onMetadataChanged(metadata);
+                PlaybackState state = mController.getPlaybackState();
+                if (state != null) onPlaybackStateChanged(state);
+            } catch (Throwable error) {
+                XposedLog.logW(TAG, "Failed to sync state for " + mController.getPackageName(), error);
+            }
         }
 
         @Override
         public void onPlaybackStateChanged(@Nullable PlaybackState state) {
             super.onPlaybackStateChanged(state);
-            if (state == null) return;
+            if (state == null || !isCurrent()) return;
             String pkg = mController.getPackageName();
+            PlaybackState previous = lastState;
+            lastState = state;
+            if (!isPreferred() && state.getState() == PlaybackState.STATE_PLAYING) {
+                MediaSession.Token selectedToken = preferredTokens.get(pkg);
+                MediaControllerCallback selected = selectedToken != null ? mCallbacks.get(selectedToken) : null;
+                PlaybackState selectedState = selected != null ? selected.lastState : null;
+                if (previous == null || previous.getState() != PlaybackState.STATE_PLAYING
+                    || selectedState == null || state.getLastPositionUpdateTime() > selectedState.getLastPositionUpdateTime()) {
+                    select(mController);
+                    onMetadataChanged(mController.getMetadata());
+                }
+            }
+            if (!isPreferred()) return;
             if (mRuntime.isSystemPlayStateListenerDisabled(pkg)) {
                 return;
             }
@@ -273,7 +287,7 @@ public final class SystemPlayStateListener {
         @Override
         public void onMetadataChanged(@Nullable MediaMetadata metadata) {
             super.onMetadataChanged(metadata);
-            if (metadata == null) return;
+            if (metadata == null || !isCurrent() || !isPreferred()) return;
             String pkg = mController.getPackageName();
             if (mRuntime.isSystemPlayStateListenerDisabled(pkg)) {
                 return;
@@ -294,6 +308,10 @@ public final class SystemPlayStateListener {
         @Override
         public void onSessionDestroyed() {
             super.onSessionDestroyed();
+            if (!isCurrent()) return;
+            mCallbacks.remove(mController.getSessionToken(), this);
+            mController.unregisterCallback(this);
+            if (!isPreferred()) return;
             String pkg = mController.getPackageName();
             if (mRuntime.isSystemPlayStateListenerDisabled(pkg)) {
                 return;

@@ -41,3 +41,5 @@ include ':hooks-id'
 include ':lyric-hook'
 include ':lyric-network'
 include ':lyric-service'
+
+include ':superlyric-api'

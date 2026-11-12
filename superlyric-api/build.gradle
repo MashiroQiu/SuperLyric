@@ -1,0 +1,33 @@
+plugins {
+    alias(libs.plugins.android.library)
+}
+
+android {
+    namespace 'com.hchen.superlyricapi'
+    compileSdk { version = release(37) }
+    defaultConfig {
+        minSdk 26
+        consumerProguardFiles 'consumer-rules.pro'
+        buildConfigField 'int', 'API_VERSION', '40'
+        manifestPlaceholders = [superlyricapi_version_name: '4.0', superlyricapi_version_code: 40]
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+    buildFeatures {
+        buildConfig true
+        aidl true
+    }
+    testOptions { unitTests.returnDefaultValues = true }
+}
+
+dependencies {
+    implementation libs.annotation
+    testImplementation 'junit:junit:4.13.2'
+}
+
+// Generated legacy AIDL intentionally references the deprecated 3.x Parcelable.
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.add('-Xlint:-deprecation')
+}

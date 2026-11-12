@@ -34,11 +34,12 @@ dependencies {
     api project(':lyric-kernel')
     implementation libs.hooktool
     implementation libs.service
-    implementation libs.superlyricapi
+    implementation project(':superlyric-api')
     compileOnly libs.api
     implementation libs.annotation
 
     testImplementation platform(libs.junit.bom)
     testImplementation libs.junit.jupiter
+    testImplementation 'org.mockito:mockito-core:5.18.0'
     testRuntimeOnly libs.junit.platform.launcher
 }

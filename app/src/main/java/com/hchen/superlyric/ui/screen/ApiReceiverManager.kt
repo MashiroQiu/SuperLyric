@@ -183,10 +183,12 @@ internal object ApiReceiverManager {
     fun pullLatest(onComplete: ((Boolean) -> Unit)? = null) {
         scope.launch {
             try {
+                val requestedAt = totalPackets.get()
                 val view = SuperLyric.receiver().latest()
                 if (view != null) {
                     val time = LocalTime.now().format(TIME_FORMAT)
                     synchronized(publishLock) {
+                        if (totalPackets.get() != requestedAt) return@synchronized
                         val seq = totalPackets.incrementAndGet()
                         fullPackets.incrementAndGet()
                         receiverFlow.value = ApiReceiverState(
@@ -211,7 +213,9 @@ internal object ApiReceiverManager {
                     // 冷启动靠它恢复已停止状态，而不是留空
                     val stop = SuperLyric.receiver().lastStop()
                     if (stop != null) {
-                        handleIncomingStop(stop)
+                        synchronized(publishLock) {
+                            if (totalPackets.get() == requestedAt) handleIncomingStop(stop)
+                        }
                         withContext(Dispatchers.Main) {
                             onComplete?.invoke(true)
                         }

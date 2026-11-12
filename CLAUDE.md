@@ -18,9 +18,10 @@ Modules:
 - :hook-anchors: host hooks, DexKit, raw anchor buses. :hooks-id: identity extraction.
 - :lyric-hook: host lyric extraction. :lyric-network: online fetch and matching.
 - :lyric-service: runtime and stable Binder facades. :app: UI, Java shells, API102 entrance and Lyricon output.
+- :superlyric-api: vendored 4.0 API source with stale-cache guards; shared exposes it to all consumers.
 - :processor: Java annotation processor; consumes @HookThis and emits HookMaps.
 
-Dependencies are fixed: kernel <- shared <- hook-anchors <- {hooks-id, lyric-hook};
+Dependencies are fixed: {kernel, superlyric-api} <- shared <- hook-anchors <- {hooks-id, lyric-hook};
 lyric-network -> shared/kernel; lyric-service -> shared/kernel; app -> all. No reverse or circular
 dependency. hooks-id and lyric-hook never depend on each other.
 
@@ -122,7 +123,7 @@ Source contract:
 ## 4. Verification and code
 Run every module suite:
 
-    ./gradlew :lyric-kernel:test :shared:testDebugUnitTest \
+    ./gradlew :superlyric-api:testDebugUnitTest :lyric-kernel:test :shared:testDebugUnitTest \
       :hook-anchors:testDebugUnitTest :hooks-id:testDebugUnitTest \
       :lyric-hook:testDebugUnitTest :lyric-network:testDebugUnitTest \
       :lyric-service:testDebugUnitTest :app:testDebugUnitTest
