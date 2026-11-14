@@ -112,11 +112,12 @@ fun AboutLayout(
     val haptic = LocalHapticFeedback.current
     val contributors = remember {
         listOf(
-            Contributor("ghhccghk", "https://github.com/ghhccghk", R.drawable.ghhccghk),
-            Contributor("YifePlayte", "https://github.com/YifePlayte", R.drawable.yifeplayte),
-            Contributor("YuKongA", "https://github.com/YuKongA", R.drawable.yukonga),
             Contributor("AnserJim", "https://github.com/killerprojecte", R.drawable.anserjim),
             Contributor("BlueEve04", "https://github.com/BlueEve04", R.drawable.blueeve04),
+            Contributor("Higanoneko", "https://github.com/Higanoneko", R.drawable.higanoneko),
+            Contributor("ghhccghk", "https://github.com/ghhccghk", R.drawable.ghhccghk),
+            Contributor("YuKongA", "https://github.com/YuKongA", R.drawable.yukonga),
+            Contributor("YifePlayte", "https://github.com/YifePlayte", R.drawable.yifeplayte),
         )
     }
 
@@ -133,7 +134,7 @@ fun AboutLayout(
                 else -> {
                     val spacer = lazyListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == "logoSpacer" }
                     if (spacer != null && spacer.size > 0) {
-                        (lazyListState.firstVisibleItemScrollOffset.toFloat() / (spacer.size)).coerceIn(0f, 1f)
+                        (lazyListState.firstVisibleItemScrollOffset.toFloat() / spacer.size).coerceIn(0f, 1f)
                     } else {
                         0f
                     }
@@ -299,14 +300,10 @@ fun AboutLayout(
                     overscrollEffect = null
                 ) {
                     item(key = "logoSpacer") {
-                        Box(
-                            Modifier
+                        Spacer(
+                            modifier = Modifier
                                 .fillMaxWidth()
-                                .height(
-                                    logoHeightDp + 200.dp,
-                                ),
-                            contentAlignment = Alignment.TopCenter,
-                            content = { },
+                                .height(logoHeightDp + 200.dp)
                         )
                     }
 

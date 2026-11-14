@@ -27,7 +27,6 @@ import com.hchen.superlyric.kernel.orchestrate.LyricSource
 import com.hchen.superlyric.kernel.outcome.LyricOutcome
 import com.hchen.superlyric.kernel.pipeline.LyricFormat
 import com.hchen.superlyric.kernel.pipeline.LyricRequest
-import com.hchen.superlyric.kernel.decode.DecodeException
 import com.hchen.superlyric.kernel.decode.PayloadBytes
 import com.hchen.superlyric.provider.base.FetchSlot
 import com.hchen.superlyric.network.HttpClients
@@ -35,7 +34,6 @@ import com.hchen.superlyric.network.readTextBounded
 import com.hchen.superlyric.utils.LyricCacheStore
 import com.hchen.superlyric.utils.LyricDiag
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 import java.io.IOException
@@ -50,7 +48,7 @@ import okhttp3.Response
  * 酷狗开放接口取词来源：官方 KRC 接口直查与检索
  *
  * 接口：
- * - 检索：`mobilecdn.kugou.com/api/v3/search/song`（歌名 + 歌手 → 候选 Hash）
+ * - 检索：`mobileservice.kugou.com/api/v3/search/song`（歌名 + 歌手 → 候选 Hash）
  * - 取歌词 id / accesskey：`krcs.kugou.com/search?hash=…`
  * - 下载：`krcs.kugou.com/download?id=…&accesskey=…&fmt=krc`
  */
@@ -69,53 +67,62 @@ class KuGouApiSource : LyricSource {
     }
 
     private fun resolve(identity: TrackIdentity): LyricOutcome {
+        var lastFailure: Throwable? = null
+
         // 直查：宿主上报的哈希不一定是歌词哈希（同一曲目可能出现多个不同哈希），
-        // 落空时必须回退到检索；否则有歌词的曲目会被误判为无歌词并下发纯音乐占位。
-        hashOf(identity)?.let { direct ->
-            attempt(direct, identity)?.let { return it }
+        // 落空或解不开时必须回退到检索；否则有歌词的曲目会被误判为无歌词并下发纯音乐占位。
+        val direct = hashOf(identity)
+        if (direct != null) {
+            when (val outcome = attempt(direct, identity)) {
+                is LyricOutcome.Success -> return outcome
+                is LyricOutcome.TransientFailure -> outcome.cause?.let { lastFailure = it }
+                else -> Unit
+            }
             AndroidLog.logD(
                 sourceName,
                 "Direct hash lookup yielded no lyric: $direct; falling back to keyword search",
             )
         }
 
-        val searchedHashes = searchBestHashes(identity)
         // 检索落空不等于平台确定没有歌词：可能只是未匹配上，或报文结构变化。
         // NoLyrics 允许下发纯音乐占位，一次误判就会把有歌词的曲目永久标记。
-        if (searchedHashes.isEmpty()) return LyricOutcome.TransientFailure(null)
-
+        val searchedHashes = searchBestHashes(identity)
         // 达到采纳线的候选都可能没有 KRC（平台只对部分曲目提供逐字歌词），
-        // 首个候选落空不代表整首没有；按分数依次尝试
+        // 单个候选失败不代表整首没有；按分数依次尝试，全部失败才返回可重试失败
         for (hash in searchedHashes) {
-            attempt(hash, identity)?.let { return it }
+            when (val outcome = attempt(hash, identity)) {
+                is LyricOutcome.Success -> return outcome
+                is LyricOutcome.TransientFailure -> outcome.cause?.let { lastFailure = it }
+                else -> Unit
+            }
         }
         // 全部候选都拿不到可用歌词（下载失败、解码失败，或平台确实没有），
         // 不足以判定“这首歌没有歌词”
-        return LyricOutcome.TransientFailure(null)
+        return LyricOutcome.TransientFailure(lastFailure)
     }
 
     /**
      * 对单个哈希取词
      *
-     * @return [LyricOutcome.Success] 或 [LyricOutcome.TransientFailure]；
-     *         返回 `null` 表示该哈希没有歌词，调用方可继续尝试其它哈希
+     * 返回 `null` 表示该哈希没有歌词；下载、解码或解析失败返回
+     * [LyricOutcome.TransientFailure]，调用方继续尝试其它哈希
      */
     private fun attempt(hash: String, identity: TrackIdentity): LyricOutcome? {
         val cached = readCachedKrc(hash)
-        val krcPayload = cached ?: downloadKrc(hash, identity.durationMs)
-        if (krcPayload == null) {
-            AndroidLog.logD(sourceName, "No KRC payload for hash=$hash")
-            return null
-        }
+        return try {
+            val krcPayload = cached ?: downloadKrc(hash, identity.durationMs)
+            if (krcPayload == null) {
+                AndroidLog.logD(sourceName, "No KRC payload for hash=$hash")
+                return null
+            }
 
-        val bytes = PayloadBytes.decode(krcPayload)
-        if (bytes.isEmpty()) {
-            AndroidLog.logD(sourceName, "Empty KRC payload for hash=$hash")
-            return null
-        }
+            val bytes = PayloadBytes.decode(krcPayload)
+            if (bytes.isEmpty()) {
+                AndroidLog.logD(sourceName, "Empty KRC payload for hash=$hash")
+                return null
+            }
 
-        val doc = try {
-            LyricDiag.parse(
+            val doc = LyricDiag.parse(
                 sourceName,
                 LyricRequest(
                     format = LyricFormat.KRC,
@@ -126,32 +133,29 @@ class KuGouApiSource : LyricSource {
                     lyricId = hash,
                 )
             )
-        } catch (e: DecodeException) {
-            // 解不开表示本次未拿到，不是没有歌词。
-            AndroidLog.logW(sourceName, "KRC decode failed: ${e.message}")
-            // 失败也可能来自损坏的缓存条目；删除后下次回退到网络重取。
-            LyricCacheStore.delete(null, PROVIDER_NAME, hash)
-            return LyricOutcome.TransientFailure(e)
-        }
+            if (doc == null || doc.isEmpty) {
+                AndroidLog.logD(sourceName, "Parsed no lines for hash=$hash")
+                return null
+            }
 
-        if (doc == null || doc.isEmpty) {
-            AndroidLog.logD(sourceName, "Parsed no lines for hash=$hash")
-            return null
+            // 只缓存本次从网络取回且已验证可解析的载荷。命中缓存时不再回写，
+            // 避免日志同时出现 HIT 与已缓存。
+            if (cached == null) {
+                LyricCacheStore.putAsync(null, LyricCacheStore.PROVIDER_KUGOU, hash, krcPayload)
+            }
+            AndroidLog.logI(sourceName, "Fetched KRC for hash=$hash, lines=${doc.lines.size}")
+            LyricOutcome.Success(doc)
+        } catch (e: Exception) {
+            // 单个候选的下载、解码或解析失败只否定该哈希，不能终止整个候选遍历
+            AndroidLog.logW(sourceName, "KRC candidate failed for hash=$hash: ${e.message}")
+            // 损坏的缓存条目会让该哈希每次都失败：删除后下次回退到网络重取
+            if (cached != null) LyricCacheStore.delete(null, LyricCacheStore.PROVIDER_KUGOU, hash)
+            LyricOutcome.TransientFailure(e)
         }
-
-        // 只缓存本次从网络取回且已验证可解析的载荷。命中缓存时不再回写，
-        // 避免日志同时出现 HIT 与已缓存。
-        if (cached == null) {
-            LyricCacheStore.putAsync(null, PROVIDER_NAME, hash, krcPayload)
-        }
-        AndroidLog.logI(sourceName, "Fetched KRC for hash=$hash, lines=${doc.lines.size}")
-        return LyricOutcome.Success(doc)
     }
 
     private fun hashOf(identity: TrackIdentity): String? =
-        identity.catalogId?.takeIf { it.catalog == LyricCatalog.KUGOU }?.id
-            ?.let(CatalogIds::kugouHash)
-            ?: CatalogIds.kugouHash(TrackIdentity.normalizeStableId(identity.stableId))
+        CatalogIds.lyricId(identity, LyricCatalog.KUGOU, CatalogIds::kugouHash)
 
     /**
      * 按歌名 + 歌手检索候选，返回达到采纳线的 Hash（按分数降序）
@@ -163,8 +167,9 @@ class KuGouApiSource : LyricSource {
     private fun searchBestHashes(identity: TrackIdentity): List<String> {
         if (identity.title.isBlank()) return emptyList()
 
-        val keyword = if (identity.artist.isBlank()) identity.title else identity.title + " " + identity.artist
-        val url = "http://mobilecdn.kugou.com/api/v3/search/song?format=json&page=1&pagesize=5&keyword=" +
+        val keyword = if (identity.artist.isBlank()) identity.title else "${identity.title} ${identity.artist}"
+        // 宿主可能按 targetSdk 禁用明文 HTTP，检索与取词都必须走 HTTPS
+        val url = "https://mobileservice.kugou.com/api/v3/search/song?format=json&page=1&pagesize=5&keyword=" +
                 URLEncoder.encode(keyword, StandardCharsets.UTF_8.name())
 
         val json = get(url)
@@ -191,8 +196,8 @@ class KuGouApiSource : LyricSource {
                 candidateArtist,
                 candidateDurationMs,
             )
-            candidates += "\"" + candidateTitle + "\"/\"" + candidateArtist + "\"/" + (candidateDurationMs / 1000) + "s" +
-                    "=" + score.roundTo1() + " hash=" + hash
+            candidates += "\"$candidateTitle\"/\"$candidateArtist\"/${candidateDurationMs / 1000}s=" +
+                    "${score.roundTo1()} hash=$hash"
             if (score > LyricScorer.MIN_ACCEPT_SCORE) accepted += hash to score
         }
 
@@ -200,12 +205,12 @@ class KuGouApiSource : LyricSource {
         // 正确版本不在候选内，还是打分将其淘汰；这三种情况的处理不同。
         AndroidLog.logD(
             sourceName,
-            "Candidates for \"" + keyword + "\" (target \"" + identity.title + "\"/\"" + identity.artist + "\"/" +
-                    (identity.durationMs / 1000) + "s): " + candidates.joinToString(" | ").ifEmpty { "none" },
+            "Candidates for \"$keyword\" (target \"${identity.title}\"/\"${identity.artist}\"/" +
+                    "${identity.durationMs / 1000}s): ${candidates.joinToString(" | ").ifEmpty { "none" }}",
         )
 
         if (accepted.isEmpty()) {
-            AndroidLog.logD(sourceName, "No KuGou candidate reached the acceptance threshold for \"" + keyword + "\"")
+            AndroidLog.logD(sourceName, "No KuGou candidate reached the acceptance threshold for \"$keyword\"")
         }
         // 稳定排序：同分候选保持检索顺序，首位优先
         return accepted.sortedByDescending { it.second }.map { it.first }
@@ -214,16 +219,16 @@ class KuGouApiSource : LyricSource {
     private fun Double.roundTo1(): String = String.format(Locale.US, "%.1f", this)
 
     private fun downloadKrc(hash: String, durationMs: Long): String? {
-        val searchUrl = "http://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=$durationMs&hash=$hash"
+        val searchUrl = "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=$durationMs&hash=$hash"
         val searchJson = get(searchUrl)
         val candidates = JSONObject(searchJson).optJSONArray("candidates")
-        val first = firstObject(candidates) ?: return null
+        val first = candidates?.takeIf { it.length() > 0 }?.optJSONObject(0) ?: return null
 
         val id = first.optString("id", "")
         val accessKey = first.optString("accesskey", "")
         if (id.isEmpty() || accessKey.isEmpty()) return null
 
-        val downloadUrl = "http://krcs.kugou.com/download?ver=1&client=mobi" +
+        val downloadUrl = "https://krcs.kugou.com/download?ver=1&client=mobi" +
                 "&id=${URLEncoder.encode(id, StandardCharsets.UTF_8.name())}" +
                 "&accesskey=${URLEncoder.encode(accessKey, StandardCharsets.UTF_8.name())}" +
                 "&fmt=krc&charset=utf8"
@@ -239,20 +244,17 @@ class KuGouApiSource : LyricSource {
      * 文件损坏导致解密失败时，[attempt] 会删除该条目，下次回退到网络。
      */
     private fun readCachedKrc(hash: String): String? {
-        val bytes = LyricCacheStore.getBytes(null, PROVIDER_NAME, hash) ?: return null
+        val bytes = LyricCacheStore.getBytes(null, LyricCacheStore.PROVIDER_KUGOU, hash) ?: return null
         AndroidLog.logI(sourceName, "Lyric disk cache hit for hash=$hash")
         return String(bytes, StandardCharsets.UTF_8)
     }
-
-    private fun firstObject(array: JSONArray?): JSONObject? =
-        if (array == null || array.length() == 0) null else array.optJSONObject(0)
 
     /**
      * 发起一次 GET
      *
      * 传输层失败必须抛出，不能返回 null：调用方用 null 表示平台没有该歌词；
      * 若把网络异常压成 null，断网会被判为确定性无歌词并下发纯音乐占位。
-     * 抛出后由 [start] 的 `runCatching` 归类为 [LyricOutcome.TransientFailure]，
+     * 抛出后由 FetchSlot 归类为 [LyricOutcome.TransientFailure]，
      * 只重试、不下发占位。
      */
     private fun get(url: String): String {
@@ -265,10 +267,6 @@ class KuGouApiSource : LyricSource {
     }
 
     private companion object {
-        /** 磁盘缓存命名空间，须与 `LyricCacheStore.ONLINE_PROVIDERS` 一致 */
-        const val PROVIDER_NAME = "Kugou"
-
         const val USER_AGENT = "KuGou2012-7093-Android601"
-
     }
 }

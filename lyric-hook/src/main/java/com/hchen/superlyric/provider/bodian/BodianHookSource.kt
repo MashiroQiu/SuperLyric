@@ -62,12 +62,12 @@ class BodianHookSource : InstallableLyricSource {
     private val docStash = KeyedStash<ParsedStash>()
     private val pathStash = KeyedStash<PathStash>()
 
+    /** start() 在编排线程重置，宿主回调线程读写；去重判断必须看到最新值 */
+    @Volatile
     private var lastProcessedPath: String? = null
 
     override fun install() {
-        BodianAnchors.install { filePath, title, artist, album, rid ->
-            onLyricFile(filePath, title, artist, album, rid)
-        }
+        BodianAnchors.install(::onLyricFile)
     }
 
     override fun start(identity: TrackIdentity, session: LyricSource.Session) {

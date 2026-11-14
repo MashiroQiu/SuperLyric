@@ -6,6 +6,7 @@ import okhttp3.internal.concurrent.TaskRunner;
 /** Shut down library workers only when they belong to this isolated module generation. */
 public final class LibraryWorkers {
     private LibraryWorkers() {}
+    @androidx.annotation.OptIn(markerClass = kotlinx.coroutines.DelicateCoroutinesApi.class)
     public static void close() {
         ClassLoader owner = LibraryWorkers.class.getClassLoader();
         if (TaskRunner.class.getClassLoader() == owner) {

@@ -1,6 +1,6 @@
-# API 102 generation reload on upstream 4.1
+# API 102 generation reload on upstream 4.2
 
-This fork merges HChenX/SuperLyric master 359238e and retains the Lyricon output bridge and API 102 lifecycle. The tested feature branch preceding the merge was 601c2d3. The two Binder facades now share the upstream LyricRuntime; the old parallel service/provider implementation is removed.
+This fork merges HChenX/SuperLyric 4.2 (9492d7) and retains the Lyricon output bridge and API 102 lifecycle. The two Binder facades share the upstream LyricRuntime. See UPSTREAM-4.2-AUDIT.md for the upstream/custom patch decisions.
 
 ## Handover
 
@@ -18,6 +18,6 @@ SystemUI's main process consumes upstream 4.0 lyric/state data. Translation and 
 
 ## Validation and installation
 
-The workspace builds signed debug/release variants and runs all eight module suites. The published release test APK deliberately disables R8/resource shrinking via gradle/hotreload-test.gradle; production release defaults still enable optimization. The packaged DEX is checked for API102 callbacks, SDK reflection contracts and lifecycle methods. Device ART/Binder unloading and actual power consumption are not validated by these checks.
+The workspace builds signed debug/release variants and runs all nine module suites. The published release test APK deliberately disables R8/resource shrinking via gradle/hotreload-test.gradle; production release defaults still enable optimization. The packaged DEX is checked for API102 callbacks, SDK reflection contracts and lifecycle methods. Device ART/Binder unloading and actual power consumption are not validated by these checks.
 
 See [installation and power checks](POWER-AND-UPGRADE-20261111.md). The signing certificate changed because the old private key was unavailable; back up preferences before replacing the old packages. Initial activation of this pair requires one reboot. Test subsequent same-signed updates with unchanged SystemUI, system_server and music-process PIDs. Check lyrics, icons, translations, seeks, player switching, screen-off restoration and retired workers. Restart the affected process if the framework rejects reload or cleanup fails.

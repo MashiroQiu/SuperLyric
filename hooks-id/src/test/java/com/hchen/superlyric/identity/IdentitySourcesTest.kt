@@ -189,6 +189,60 @@ class IdentitySourcesTest {
     }
 
     @Test
+    fun `migu metadata for a different title is a provisional track change`() {
+        val source = MobileMusicIdentitySource()
+        source.onCapture(
+            MobileMusicAnchors.Capture(
+                "song-1", "Song", "Artist", 2_000L, "Album",
+                listOf(NativeLine(1_000L, 2_000L, "Hello", null, listOf("Hello"), listOf(1_000L))),
+                emptyList(), 0L, null,
+            )
+        )
+
+        val next = source.mergeIdentity(
+            source.currentTrackIdentity(), "Other", "Artist", 4_000L, null,
+        )
+        assertEquals("Other", next!!.title)
+        assertNull(next.stableId)
+        assertEquals(4_000L, next.durationMs)
+    }
+
+    @Test
+    fun `migu title rewritten like a lyric line keeps the native identity`() {
+        val source = MobileMusicIdentitySource()
+        source.onCapture(
+            MobileMusicAnchors.Capture(
+                "song-1", "Song", "Artist", 2_000L, "Album",
+                listOf(NativeLine(1_000L, 2_000L, "Hello", null, listOf("Hello"), listOf(1_000L))),
+                emptyList(), 0L, null,
+            )
+        )
+
+        val same = source.mergeIdentity(
+            source.currentTrackIdentity(), "first lyric line", "Artist", 2_000L, null,
+        )
+        assertEquals("migu:song-1", same!!.stableId)
+    }
+
+    @Test
+    fun `migu native identity wins when metadata only changes duration`() {
+        val source = MobileMusicIdentitySource()
+        source.onCapture(
+            MobileMusicAnchors.Capture(
+                "song-1", "Song", "Artist", 2_000L, "Album",
+                listOf(NativeLine(1_000L, 2_000L, "Hello", null, listOf("Hello"), listOf(1_000L))),
+                emptyList(), 0L, null,
+            )
+        )
+
+        val same = source.mergeIdentity(
+            source.currentTrackIdentity(), "Song", "Artist", 9_000L, null,
+        )
+        assertEquals("migu:song-1", same!!.stableId)
+        assertEquals(2_000L, same.durationMs)
+    }
+
+    @Test
     fun `migu empty song id stays a provisional identity`() {
         val source = MobileMusicIdentitySource()
         source.onCapture(
@@ -222,9 +276,31 @@ class IdentitySourcesTest {
         assertEquals("spotify:4uLU6hMCjMI75M1A2tKUQC", spotifyIdentity.stableId)
         assertEquals(CatalogId(LyricCatalog.SPOTIFY, "4uLU6hMCjMI75M1A2tKUQC"), spotifyIdentity.catalogId)
 
+        // 新版宿主上报 spotify:track:<id> URI，稳定标识与曲库 ID 都必须归一为裸 id
+        val spotifyUriIdentity = spotify.current(
+            "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+            "Song",
+            "Artist",
+            1_000L,
+        )
+        assertEquals("spotify:4uLU6hMCjMI75M1A2tKUQC", spotifyUriIdentity.stableId)
+        assertEquals(CatalogId(LyricCatalog.SPOTIFY, "4uLU6hMCjMI75M1A2tKUQC"), spotifyUriIdentity.catalogId)
+
         val apple = AppleIdentitySource("Apple")
         val appleIdentity = apple.current("abc", "Song", "Artist", 1_000L)
         assertEquals("abc", appleIdentity.stableId)
         assertNull(appleIdentity.catalogId)
+    }
+
+    @Test
+    fun `apple and miui drop placeholder metadata ids`() {
+        // 占位值经 normalizeStableId 仍非空，会参与 TrackIdentity.matches 的恒等比较
+        val placeholders = listOf("0", "-1", "unknown", "none")
+        val apple = AppleIdentitySource("Apple")
+        val miui = MiuiIdentitySource("Miui")
+        for (placeholder in placeholders) {
+            assertNull(apple.current(placeholder, "Song", "Artist", 1_000L).stableId)
+            assertNull(miui.current(placeholder, "Song", "Artist", 1_000L).stableId)
+        }
     }
 }

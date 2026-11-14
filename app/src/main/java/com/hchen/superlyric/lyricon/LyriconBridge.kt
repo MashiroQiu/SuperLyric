@@ -32,6 +32,8 @@ import io.github.proify.lyricon.provider.ConnectionListener
 import java.util.concurrent.Executors
 
 /** All view/provider state is main-thread-owned; Binder registration runs off the UI thread. */
+// Only applicationContext is retained, and close releases it when the module generation retires.
+@android.annotation.SuppressLint("StaticFieldLeak")
 object LyriconBridge {
     private const val TAG = "SuperLyric-Lyricon"
     private const val CENTRAL_BOOT = "io.github.proify.lyricon.lyric.bridge.CENTRAL_BOOT_COMPLETED"

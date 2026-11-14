@@ -72,8 +72,7 @@ object LyricDiag {
     }.getOrNull()
 
     /** 单次载荷输出的字符上限，防止畸形报文撑爆日志缓冲区 */
-    @JvmField
-    var maxPayloadChars: Int = 120_000
+    private const val MAX_PAYLOAD_CHARS = 120_000
 
     // logcat 单条约 4KB，中文每字符 UTF-8 占 3 字节：2600 字符约 7.8KB，会被截断。
     // 取 1200 字符，最坏 3.6KB 加前缀，仍在单条上限内。
@@ -92,7 +91,14 @@ object LyricDiag {
 
         val qrcStats = QrcParser.ParseStats()
         val doc = try {
-            LyricPipeline.parse(request, qrcStats)
+            LyricPipeline.parseDetailed(request, qrcStats) { trace ->
+                val reason = trace.reason?.let { " reason=$it" }.orEmpty()
+                log(
+                    source,
+                    "PARSE parser=${trace.parserId} accepted=${trace.accepted} " +
+                            "lines=${trace.lineCount}$reason",
+                )
+            }
         } catch (t: Throwable) {
             log(source, "PARSE THREW ${t.javaClass.simpleName}: ${t.message}")
             throw t
@@ -258,8 +264,7 @@ object LyricDiag {
     @JvmStatic
     fun dumpMetadata(source: String, metadata: MediaMetadata) {
         if (!enabled) return
-        // 诊断输出不得改变控制流：QQ 的 Bundle 可能带 null 键，排序会抛 NPE 并中断
-        // 后续的取消停止与切歌处理
+        // 诊断是独立步骤：输出失败只记录，不影响后续的取消停止与切歌处理。
         runCatching { dumpMetadataUnchecked(source, metadata) }
             .onFailure { log(source, "META dump failed: " + it.javaClass.simpleName) }
     }
@@ -290,7 +295,7 @@ object LyricDiag {
         val bundle = BUNDLE_FIELD
             ?.let { field -> runCatching { field.get(metadata) }.getOrNull() }
                 as? Bundle
-        if (bundle == null) return runCatching { metadata.getText(key)?.toString() }.getOrNull()
+        if (bundle == null) return metadata.getText(key)?.toString()
         return (bundle.get(key) as? CharSequence)?.toString()
     }
 
@@ -324,8 +329,9 @@ object LyricDiag {
      * 带序号、后续行无法归属，更难读。
      */
     private fun dumpText(source: String, label: String, text: String) {
-        val safe = if (text.length > maxPayloadChars) {
-            text.substring(0, maxPayloadChars) + "⏎…[TRUNCATED ${text.length - maxPayloadChars} chars]"
+        val safe = if (text.length > MAX_PAYLOAD_CHARS) {
+            text.substring(0, MAX_PAYLOAD_CHARS) +
+                    "⏎…[TRUNCATED ${text.length - MAX_PAYLOAD_CHARS} chars]"
         } else {
             text
         }.replace('\n', '⏎')

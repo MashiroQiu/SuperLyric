@@ -87,14 +87,13 @@ class SodaHookSource : InstallableLyricSource {
 
     private var scheduled: ScheduledFuture<*>? = null
 
+    /** 调度线程写、宿主回调线程读，两条路径都可能在锁外访问 */
+    @Volatile
     private var deliveredKey: String? = null
 
     override fun install() {
-        SodaAnchors.install { type, language, payload, trackId ->
-            onPayload(type, language, payload, trackId)
-        }
+        SodaAnchors.install(::onPayload)
     }
-
 
     override fun start(identity: TrackIdentity, session: LyricSource.Session) {
         requests.open(identity, session)
@@ -214,8 +213,7 @@ class SodaHookSource : InstallableLyricSource {
             else Batch(main, translation, active, matched)
         } ?: return
 
-        val key = batch.main.type + "|" + batch.main.payload.hashCode() + "|" +
-                batch.translation?.payload?.hashCode()
+        val key = "${batch.main.type}|${batch.main.payload.hashCode()}|${batch.translation?.payload?.hashCode()}"
         if (key == deliveredKey) return
 
         if (!requests.isCurrent(batch.request)) return
@@ -231,8 +229,8 @@ class SodaHookSource : InstallableLyricSource {
             // 两套命名空间下的 id 不相等是常态，这条日志是"取到的是当前曲目"的旁证
             AndroidLog.logI(
                 sourceName,
-                "Publishing by arrival order: payload id ${batch.main.trackId} "
-                        + "!= identity ${batch.request.identity.stableId}",
+                "Publishing by arrival order: payload id ${batch.main.trackId} != " +
+                        "identity ${batch.request.identity.stableId}",
             )
         }
         batch.request.session.deliver(outcome)
@@ -290,7 +288,6 @@ class SodaHookSource : InstallableLyricSource {
         AndroidLog.logI(sourceName, "Parsed ${doc.lines.size} lines (${main.type})")
         return LyricOutcome.Success(doc.withMetadata(current))
     }
-
 
     private fun isTranslation(language: String): Boolean =
         language.isNotEmpty() && !language.equals(MAIN_LANGUAGE, ignoreCase = true)

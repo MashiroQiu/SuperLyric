@@ -64,6 +64,8 @@ public final class CallbackEndpoints {
         legacyEndpoint = (Binder) state.get("legacy");
     }
 
+    // LSPosed must intercept BinderProxy death links to retire callbacks from the old module loader.
+    @android.annotation.SuppressLint("PrivateApi")
     public static void install(XposedInterfaceWrapper module) {
         try {
             module.hook(Binder.class.getDeclaredMethod("onTransact", int.class, Parcel.class, Parcel.class, int.class))

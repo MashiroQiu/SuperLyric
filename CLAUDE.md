@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Normative rules for AI coding agents. Read before changing code. Keep this file accurate for the
-current tree. Maximum 160 lines, four top-level sections.
+Normative rules for AI coding agents; docs/anti-patterns.md also binds. Read both before changing
+code. Keep this file accurate for the current tree. Maximum 160 lines, four top-level sections.
 
 ## 1. Architecture
 
@@ -36,7 +36,6 @@ Boundaries:
 - shared holds contracts, generation resource ownership and reusable helpers; no reverse module dependencies.
 
 ## 2. Invariants
-
 ### Acquisition and registration
 
 - Prefer the Hook path: fewest points, each deliberate. Do not hook broadly.

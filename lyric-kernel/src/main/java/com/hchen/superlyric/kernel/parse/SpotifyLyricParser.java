@@ -66,6 +66,20 @@ public final class SpotifyLyricParser {
         return parseProtobufLyrics(data);
     }
 
+    /**
+     * 判断解析结果是否有可用时间轴。
+     *
+     * 全部行共用 0 起点时是平台返回的未同步歌词：行序与索引都无法随播放推进，
+     * 按定时文档发布会让客户端永远高亮首行。单行 0 起点仍是合法歌词。
+     */
+    public static boolean hasUsableTimeline(List<Line> lines) {
+        if (lines.size() < 2) return true;
+        for (Line line : lines) {
+            if (line.startTimeMs > 0L) return true;
+        }
+        return false;
+    }
+
     private static List<RawLine> mapJsonLines(List<JsonLyricLine> jsonLines) {
         List<RawLine> lines = new ArrayList<>(jsonLines.size());
         for (JsonLyricLine jsonLine : jsonLines) {
@@ -313,7 +327,6 @@ public final class SpotifyLyricParser {
             if (i + 1 < validLines.size()) {
                 endTimeMs = Math.min(endTimeMs, validLines.get(i + 1).startTimeMs);
             }
-            if (endTimeMs < line.startTimeMs) continue;
             // 同一时间戳的多行（对唱/双语）不能因为 end == start 被整行丢弃；
             // 给 1ms 的可渲染区间，消费方按 start 切行。
             if (endTimeMs == line.startTimeMs) endTimeMs = line.startTimeMs + 1L;
@@ -343,7 +356,7 @@ public final class SpotifyLyricParser {
                                                       long lineStart, long lineEnd) {
         if (syllables == null || syllables.isEmpty()) return null;
 
-        List<LyricWord> result = new ArrayList<LyricWord>(syllables.size());
+        List<LyricWord> result = new ArrayList<>(syllables.size());
         int cursor = 0;
         long previousEnd = lineStart;
         for (int i = 0; i < syllables.size(); i++) {

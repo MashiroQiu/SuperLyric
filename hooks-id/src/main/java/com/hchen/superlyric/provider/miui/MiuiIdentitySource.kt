@@ -32,7 +32,7 @@ import com.hchen.superlyric.shared.hostString
 class MiuiIdentitySource(private val providerTag: String) : BaseIdentitySource() {
 
     override fun install() {
-        MiuiAnchors.install { snapshot -> onSnapshot(snapshot) }
+        MiuiAnchors.install(::onSnapshot)
     }
 
     override fun refresh() {
@@ -54,7 +54,8 @@ class MiuiIdentitySource(private val providerTag: String) : BaseIdentitySource()
     ): TrackIdentity {
         val identity = TrackIdentity(
             source = providerTag,
-            stableId = mediaId.ifEmpty { null },
+            // 占位值不能当权威标识：MEDIA_ID 是占位串时退回标题/歌手/时长判据
+            stableId = TrackIdentity.usableId(mediaId),
             title = title,
             artist = artist,
             durationMs = durationMs,
