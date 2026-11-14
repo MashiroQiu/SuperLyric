@@ -1,18 +1,19 @@
-R3 配套修复测试版：历史歌曲歌词回滚与后台重复工作。
+SuperLyric 4.2 上游同步版 R4（API 102 / 真正热重载 / Lyricon 对接）。
 
-已用阻塞旧请求的并发测试复现 SuperLyricApi 4.0 的缓存回滚：新歌 FULL 已经到达后，旧的补拉请求仍覆盖缓存。原实现测试为 expected new but actual old，修复后通过。修复源码随 SuperLyric 仓库中的 superlyric-api 内部模块保留，API/Binder 协议保持不变。
+完整合入上游 4.2 正式版 9492d7，包含相对上次基线新增的 22 个提交。
 
-SuperLyric：过期补拉与 latest 快照失效校验、按歌曲/发布者隔离缓存和 STOP、保留未变化的媒体会话监听、拦截已注销回调、优先使用同应用正在播放的会话；已取消取词不能继续发下一次 HTTP 请求。
+采用上游实现：播放器取得活动发布权后才能改写共享播放时钟；酷狗歌词接口 HTTPS 修复；QQ 等播放器候选歌词回退；歌词解析修复；按需构造旧接口载荷、关闭日志时减少诊断构造、广播队列拥堵处理和统一配额管理。原广播器的重复配额/超时账本已移除，热重载接入上游新管理方式。
 
-Lyricon：更换来源时取消旧加工和缓存，最终主线程投递前再次检查代际，避免旧增强结果覆盖新歌；去重完整歌曲和重复加工，合并排队的进度刷新。原动画、刷新率、图标、翻译及超级岛/摄像头边距保留。
+逐项核对后继续保留：API 4.0 旧歌词缓存回滚保护、旧 STOP/异步快照保护、MediaSession.Token 回调管理及正在播放会话优先、已取消取词不得继续 HTTP 请求、Lyricon 启动/重连歌词重发、无订阅者时停止逐行调度、API 102 状态接力和工作线程清理。上游这些提交没有完整替代这些修复。
 
-完整回归：SuperLyric 含内置 API 共 545 项，Lyricon 共 133 项测试通过；两边 debug/release 构建、签名及 API102 契约检查通过。相同签名，可覆盖 R2；release 测试包未混淆。
+验证：九个模块 614 项测试通过；debug / 签名 release 构建、debug / release lint、APK 签名和最终 DEX API 102 契约检查通过。新增测试覆盖后台播放器迟到歌词不改写当前播放时钟，以及广播订阅者热重载后的 UID 配额、全量歌词能力和退出通知。release 测试包保持未混淆。
 
-节电测试中的明确变化：100 次相同媒体会话列表不再重挂/重放；100 次重复歌曲输入只执行一次加工；同一缺失曲目的重复 STATE 共用一次补拉。未连接手机，CPU/真实耗电降幅及设备播放/热重载效果仍待实测。这些修复不能证明手机上所有错歌原因均已排除。
+与 R3 使用相同签名，版本号更高，可覆盖安装。本次只更新 SuperLyric，Lyricon 继续使用现有 R3 包；超级岛边距、图标、翻译、动画设置保持不变。初次从非热重载版本迁移仍需重启；R3 的后续覆盖更新可测试 LSPosed 热重载。
 
-- [SuperLyric R3 APK](https://github.com/MashiroQiu/SuperLyric/raw/refs/heads/apk-20261111-paired/SuperLyric-4.1-stale-r3-release.apk)
-- [Lyricon R3 APK](https://github.com/MashiroQiu/lyricon/raw/refs/heads/apk-20261111-paired/Lyricon-1.0.40-stale-r3-release.apk)
-- [旧歌复现和耗电复查说明](https://github.com/MashiroQiu/SuperLyric/blob/integrate/upstream-hot-reload-20261111/docs/STALE-LYRICS-AND-POWER-R3.md)
-- [Lyricon 加工链修复](https://github.com/MashiroQiu/lyricon/blob/integrate/power-paired-20261111/docs/STALE-SONG-PIPELINE-R3.md)
+没有连接手机，未实测 CPU、耗电或设备热重载。4.2 的发送端优化不能证明 Lyricon RenderThread 高占用已经解决。重点复测酷狗概念版长时间播放、自动/手动切歌、换播放器、开机播放及锁屏恢复。
 
-重点复测酷狗概念版连续播放、自动/手动切歌、换播放器和锁屏恢复。如果仍错歌，先记录正确歌名与错误歌名并保留发生前后的 LSPosed/logcat 日志，再切歌恢复。耗电比较请保持同一首歌、相同效果、刷新率和前台界面，分别记录稳定播放和暂停各 30 秒。
+- [R4 APK 直链](https://github.com/MashiroQiu/SuperLyric/raw/refs/heads/apk-20261111-paired/SuperLyric-4.2-api102-r4-release.apk)
+- [合并与补丁取舍记录](https://github.com/MashiroQiu/SuperLyric/blob/integrate/upstream-hot-reload-20261111/docs/UPSTREAM-4.2-AUDIT.md)
+- [配套 Lyricon R3](https://github.com/MashiroQiu/lyricon/releases/tag/paired-api102-20261112-r3)
+
+SHA256: `9e856a6ca8fc365d3f20c65c69dd9d43e60daef3bc85415782a508dd64bd7d88`
