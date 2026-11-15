@@ -88,7 +88,12 @@ object LyriconBridge {
         override fun onStop(stop: Stop) { if (retiring) return; handler.post { safely {
             inputVersion++
             if (stop.publisher == null || stop.publisher == publisher) {
+                unbindController()
+                cachedSong = null
+                cachedLyric = null
+                lastPlayback = null
                 provider?.player?.setPlaybackState(false)
+                provider?.player?.setSong(null)
             }
         } } }
     }
@@ -236,7 +241,7 @@ object LyriconBridge {
     }
 
     private fun bindController() {
-        if (!screenOn) return
+        if (!screenOn || cachedLyric == null) return
         val candidates = manager?.getActiveSessions(null).orEmpty().filter { it.packageName == publisher }
         val next = candidates.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
             ?: candidates.firstOrNull()
@@ -259,6 +264,7 @@ object LyriconBridge {
     }
 
     private fun syncPlayback(state: PlaybackState) {
+        if (cachedLyric == null) return
         lastPlayback = state
         if (screenOn) provider?.player?.setPlaybackState(state)
     }

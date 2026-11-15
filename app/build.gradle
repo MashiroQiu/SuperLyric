@@ -178,6 +178,7 @@ dependencies {
     compileOnly project(':processor')
     annotationProcessor project(':processor')
 
+    testImplementation "org.mockito:mockito-core:5.18.0"
     testImplementation libs.api
     testImplementation platform(libs.junit.bom)
     testImplementation libs.junit.jupiter

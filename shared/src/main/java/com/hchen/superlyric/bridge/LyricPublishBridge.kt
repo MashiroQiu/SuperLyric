@@ -19,6 +19,7 @@
 package com.hchen.superlyric.bridge
 
 import com.hchen.hooktool.log.AndroidLog
+import com.hchen.hooktool.log.XposedLog
 import com.hchen.superlyric.kernel.identity.TrackIdentity
 import com.hchen.superlyric.kernel.model.LyricDoc
 import com.hchen.superlyric.kernel.model.PureMusicDoc
@@ -45,19 +46,19 @@ class LyricPublishBridge(
 
     override fun onTrackChanged(identity: TrackIdentity) {
         // 生命周期事件，用 logI 而非 logD：必须始终可见
-        AndroidLog.logI(
+        XposedLog.logI(
             TAG,
             "Track changed: id=${identity.stableId}, title=\"${identity.title}\", " +
                     "artist=\"${identity.artist}\", duration=${identity.durationMs}ms"
         )
         // 切歌后立刻下发停止，空窗期由客户端自行呈现
-        AndroidLog.logI(TAG, "Clearing previous lyric for the new track")
+        XposedLog.logI(TAG, "Clearing previous lyric for the new track")
         AbsPublisher.publishStop()
     }
 
     override fun onLyricResolved(outcome: LyricOutcome.Success) {
         val doc = correctedDuration(outcome.doc)
-        AndroidLog.logI(
+        XposedLog.logI(
             TAG,
             "Publishing full lyric: lyricId=${doc.lyricId}, lines=${doc.lines.size}, " +
                     "span=[${doc.firstStartMs}ms..${doc.lastEndMs}ms], " +
@@ -83,7 +84,7 @@ class LyricPublishBridge(
 
     override fun onNoLyrics(identity: TrackIdentity?) {
         // 仅平台或宿主明确报告无歌词时进入；查询失败走 onUnavailable，不下发占位
-        AndroidLog.logI(
+        XposedLog.logI(
             TAG,
             "Platform/host reported no lyric; publishing instrumental placeholder for " +
                     "id=${identity?.stableId}"
@@ -100,7 +101,7 @@ class LyricPublishBridge(
 
     override fun onUnavailable(identity: TrackIdentity?) {
         // 取词失败不代表没有歌词：不下发任何内容，否则一次断网就会把曲目永久标记为纯音乐
-        AndroidLog.logW(
+        XposedLog.logW(
             TAG,
             "No lyric result available for id=${identity?.stableId}; no placeholder published"
         )
@@ -112,7 +113,7 @@ class LyricPublishBridge(
     }
 
     override fun onStateChanged(state: LyricOrchestrator.State) {
-        AndroidLog.logI(TAG, "State -> $state")
+        XposedLog.logI(TAG, "State -> $state")
     }
 
     private companion object {

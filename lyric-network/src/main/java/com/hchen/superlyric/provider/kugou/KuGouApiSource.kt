@@ -52,7 +52,9 @@ import okhttp3.Response
  * - 取歌词 id / accesskey：`krcs.kugou.com/search?hash=…`
  * - 下载：`krcs.kugou.com/download?id=…&accesskey=…&fmt=krc`
  */
-class KuGouApiSource : LyricSource {
+class KuGouApiSource @JvmOverloads constructor(
+    private val client: okhttp3.OkHttpClient = HttpClients.standard,
+) : LyricSource {
 
     override val sourceName: String = "KugouApi"
 
@@ -164,10 +166,16 @@ class KuGouApiSource : LyricSource {
      * 酷狗曲库中同一首歌的不同版本可能登记为完全相同的歌名、歌手与时长，
      * 打分器无法区分；取最后一个会随机配上错误语言的歌词。
      */
-    private fun searchBestHashes(identity: TrackIdentity): List<String> {
+    internal fun searchBestHashes(identity: TrackIdentity): List<String> {
         if (identity.title.isBlank()) return emptyList()
 
         val keyword = if (identity.artist.isBlank()) identity.title else "${identity.title} ${identity.artist}"
+        val combined = searchHashes(identity, keyword)
+        return if (combined.isEmpty() && identity.artist.isNotBlank()) searchHashes(identity, identity.title)
+        else combined
+    }
+
+    private fun searchHashes(identity: TrackIdentity, keyword: String): List<String> {
         // 宿主可能按 targetSdk 禁用明文 HTTP，检索与取词都必须走 HTTPS
         val url = "https://mobileservice.kugou.com/api/v3/search/song?format=json&page=1&pagesize=5&keyword=" +
                 URLEncoder.encode(keyword, StandardCharsets.UTF_8.name())
@@ -259,7 +267,7 @@ class KuGouApiSource : LyricSource {
      */
     private fun get(url: String): String {
         val request = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
-        val call = HttpClients.standard.newCall(request)
+        val call = client.newCall(request)
         requests.withCall(call) { call.execute() }.use { response: Response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code} from $url")
             return response.body.readTextBounded()

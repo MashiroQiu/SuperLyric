@@ -88,7 +88,13 @@ class FetchSlot(private val executor: Executor = FETCH_POOL) {
                     AndroidLog.logW(tag, "Fetch failed: " + it.message)
                     LyricOutcome.TransientFailure(it)
                 }
-                if (isCurrent(token)) session.deliver(outcome)
+                if (isCurrent(token)) {
+                    if (outcome is LyricOutcome.TransientFailure) {
+                        com.hchen.hooktool.log.XposedLog.logW(tag,
+                            "Lyric fetch failed: ${outcome.cause?.message ?: "no usable candidate"}")
+                    }
+                    session.deliver(outcome)
+                }
             } finally {
                 requestToken.remove()
             }
